@@ -13,13 +13,20 @@
 #   2) 只比对 VERSION 也不够：开发期改了代码通常不会改版本号，照样漏检。所以再加一道
 #      「app/ 下最新的 .py 是否比进程启动时间还新」——不依赖人工记得改版本号。
 #
-# 依赖与构建：后端用 uv（清单 pyproject.toml、锁文件 uv.lock），前端用 pnpm。
-# 这两个可执行文件都不在双击时的默认 PATH 里（uv 装在 ~/.local/bin，pnpm 由 nvm 管理），
-# 所以下面会显式补 PATH 并尝试加载 nvm。
+# 依赖与运行：后端用 uv（清单 pyproject.toml、锁文件 uv.lock），前端用 pnpm。
+# 前端跑 Vite dev server（pnpm run dev，127.0.0.1:5173）直接吃源码 —— 改完前端刷新即见，
+# 不用每次 build；页面从 5173 打开，接口按 client.js 的规则显式打到 127.0.0.1:8767
+# （后端 CORS / origin 白名单已放行本机任意端口）。后端 API 仍在 8767。
+# 找不到 pnpm 时退回「构建产物 + 后端托管」的老路子：页面开 8767，仍需要 dist。
+#
+# uv / pnpm 都不在双击时的默认 PATH 里（uv 在 ~/.local/bin，pnpm 由 nvm 管理），
+# 下面会显式补 PATH 并尝试加载 nvm。
 cd "$(dirname "$0")" || exit 1
 
-PORT=8767
+PORT=8767                       # 后端：API（顺带托管 frontend/dist 作为兜底页面）
 URL="http://127.0.0.1:$PORT"
+DEV_PORT=5173                   # 前端 Vite dev server
+PAGE_URL="http://127.0.0.1:$DEV_PORT"
 
 # 双击打开时 Terminal 给的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin，
 # 不含 Homebrew、uv（~/.local/bin）与 nvm 的目录 —— 会选到系统自带的 Python 3.9，
@@ -30,16 +37,18 @@ if [ -s "$HOME/.nvm/nvm.sh" ]; then
   . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
 fi
 
+# 打开的是前端页面：dev 模式开 5173，兜底模式开 8767（看 PAGE_URL）。
 open_url() {
   if [ -d "/Applications/Google Chrome.app" ]; then
-    open -a "Google Chrome" "$URL" 2>/dev/null || open "$URL"
+    open -a "Google Chrome" "$PAGE_URL" 2>/dev/null || open "$PAGE_URL"
   else
-    open "$URL"
+    open "$PAGE_URL"
   fi
 }
 
-listening() {
-  lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1
+# 用法：listening_on <端口>；不传端口时看后端端口。
+listening_on() {
+  lsof -nP -iTCP:${1:-$PORT} -sTCP:LISTEN >/dev/null 2>&1
 }
 
 # 读两个版本号：第一行 = 当前代码里的 VERSION，第二行 = 端口上真正在跑的版本。
@@ -108,18 +117,20 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-# 前端：源码在 frontend/，包管理用 pnpm，页面由 FastAPI 托管 frontend/dist 里的构建产物。
-# dist 不存在（刚 clone、或改过前端还没重新构建）时自动构建一次，省掉手动步骤。
-if [ ! -f "frontend/dist/index.html" ]; then
-  if command -v pnpm >/dev/null 2>&1; then
-    echo "前端还没构建，正在构建（首次会先装依赖，请稍等）…"
-    if [ ! -d "frontend/node_modules" ]; then
-      ( cd frontend && pnpm install ) || echo "⚠  pnpm install 没成功，构建可能会失败。"
-    fi
-    ( cd frontend && pnpm run build ) || echo "⚠  前端构建失败：服务照常启动，但页面打不开。"
-  else
-    echo "⚠  没找到 pnpm，前端页面无法构建。"
-    echo "   装好 Node.js 后执行：cd frontend && pnpm install && pnpm run build"
+# 前端：优先 dev server（pnpm run dev）直接吃源码，改动刷新即见；pnpm 不在时退回构建产物。
+DEV_MODE=0
+if command -v pnpm >/dev/null 2>&1; then
+  DEV_MODE=1
+  if [ ! -d "frontend/node_modules" ]; then
+    echo "前端依赖还没装，正在 pnpm install（首次会稍慢）…"
+    ( cd frontend && pnpm install ) || echo "⚠  pnpm install 没成功，dev server 可能起不来。"
+  fi
+else
+  echo "⚠  没找到 pnpm，改用构建产物（页面在 ${URL}）。"
+  echo "   装好 Node.js 后执行一次：cd frontend && pnpm install"
+  PAGE_URL="$URL"
+  if [ ! -f "frontend/dist/index.html" ]; then
+    echo "   且 frontend/dist 不存在（首次 clone）——页面会返回 503，请先装 Node 并构建。"
   fi
   echo ""
 fi
@@ -128,7 +139,9 @@ V=$(versions)
 CUR=$(printf '%s\n' "$V" | sed -n 1p)
 RUN=$(printf '%s\n' "$V" | sed -n 2p)
 
-if listening; then
+# ---------- 后端（8767）：已在跑就复用，版本不符 / 代码更新则问要不要重启 ----------
+BACKEND_READY=0
+if listening_on "$PORT"; then
   # 「代码比进程新」比版本号可靠：开发期改了 .py 不一定会动 VERSION。
   NEWER_REASON=""
   SRC=$(newest_source_change)
@@ -137,86 +150,115 @@ if listening; then
     NEWER_REASON="代码比正在跑的进程新（源码 $(date -r "$SRC" '+%m-%d %H:%M')，进程启动于 $(date -r "$STARTED" '+%m-%d %H:%M')）"
   fi
   if [ "$RUN" = "$CUR" ] && [ -z "$NEWER_REASON" ]; then
-    echo "端口 ${PORT} 上已经有一个 ${CUR} 在跑，直接打开页面。"
-    open_url
-    exit 0
+    echo "端口 ${PORT} 上已经有一个 ${CUR} 的后端在跑，复用它。"
+    BACKEND_READY=1
+  else
+    echo "⚠  端口 ${PORT} 被占着，但跑的不是当前代码："
+    if [ "$RUN" != "$CUR" ]; then
+      echo "     正在跑的是「${RUN}」，当前代码是「${CUR}」。"
+    fi
+    if [ -n "$NEWER_REASON" ]; then
+      echo "     ${NEWER_REASON}。"
+    fi
+    echo "     直接复用会看到旧接口，最近的改动不会生效。"
+    printf '   要停掉它、重新起一个吗？[回车=停掉重启 / n=就复用旧的] '
+    read -r _ans
+    case "$_ans" in
+      n|N)
+        echo "   保持不动，复用现有后端。"
+        BACKEND_READY=1
+        ;;
+      *)
+        OLD_PID=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t | head -1)
+        if [ -n "$OLD_PID" ]; then
+          kill "$OLD_PID" 2>/dev/null
+          sleep 1
+          kill -9 "$OLD_PID" 2>/dev/null
+          echo "   已停掉旧进程 ${OLD_PID}。"
+        fi
+        if listening_on "$PORT"; then
+          echo "✗ 还是停不掉。手动查一下是谁占着：lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
+          printf '按回车键关闭窗口… '
+          read -r _pause
+          exit 1
+        fi
+        ;;
+    esac
   fi
-  echo "⚠  端口 ${PORT} 被占着，但跑的不是当前代码："
-  if [ "$RUN" != "$CUR" ]; then
-    echo "     正在跑的是「${RUN}」，当前代码是「${CUR}」。"
-  fi
-  if [ -n "$NEWER_REASON" ]; then
-    echo "     ${NEWER_REASON}。"
-  fi
-  echo "     直接打开会看到旧页面，最近的改动不会生效。"
-  printf '   要停掉它、重新起一个吗？[回车=停掉重启 / n=就用旧的] '
-  read -r _ans
-  case "$_ans" in
-    n|N)
-      echo "   保持不动，打开现有页面。"
-      open_url
-      exit 0
-      ;;
-    *)
-      OLD_PID=$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t | head -1)
-      if [ -n "$OLD_PID" ]; then
-        kill "$OLD_PID" 2>/dev/null
-        sleep 1
-        kill -9 "$OLD_PID" 2>/dev/null
-        echo "   已停掉旧进程 ${OLD_PID}。"
-      fi
-      if listening; then
-        echo "✗ 还是停不掉。手动查一下是谁占着：lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
-        printf '按回车键关闭窗口… '
-        read -r _pause
-        exit 1
-      fi
-      ;;
-  esac
 fi
 
-echo "恋爱·职场聊天神器 ${CUR} 启动中 → ${URL}"
-echo "解释器：${PY}（$("${PY}" --version 2>&1)）"
-echo "接口文档：${URL}/docs"
+SERVER_PID=""
+if [ "$BACKEND_READY" -eq 0 ]; then
+  echo "恋爱·职场聊天神器 ${CUR} 后端启动中 → ${URL}"
+  echo "解释器：${PY}（$("${PY}" --version 2>&1)）"
+  "${PY}" -m app serve &
+  SERVER_PID=$!
+
+  # 等端口真的监听起来再继续；最多等 5 秒。
+  i=0
+  while [ $i -lt 25 ]; do
+    listening_on "$PORT" && break
+    kill -0 "$SERVER_PID" 2>/dev/null || break   # 进程已经挂了，不必再等
+    sleep 0.2
+    i=$((i + 1))
+  done
+  if ! listening_on "$PORT"; then
+    echo ""
+    echo "✗ 后端没能在 127.0.0.1:${PORT} 上起来，页面不打开。上面的报错就是原因。"
+    echo "  排查端口占用：lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
+    kill "$SERVER_PID" 2>/dev/null
+    printf '按回车键关闭窗口… '
+    read -r _pause
+    exit 1
+  fi
+fi
+
+# ---------- 前端 dev server（5173）：已在跑就复用，否则用 pnpm run dev 起一个 ----------
+DEV_PID=""
+if [ "$DEV_MODE" -eq 1 ]; then
+  if listening_on "$DEV_PORT"; then
+    echo "端口 ${DEV_PORT} 上已经有一个 dev server 在跑，复用它（改完前端刷新即见）。"
+  else
+    echo "前端 dev server 启动中 → ${PAGE_URL}"
+    # 端口/主机/strictPort 都写在 frontend/vite.config.js 里。
+    # （pnpm 会把 `--` 原样透传给 vite，命令行再补参数反而失效，所以这里只跑干净的 dev。）
+    ( cd frontend && exec pnpm run dev ) &
+    DEV_PID=$!
+
+    i=0
+    while [ $i -lt 75 ]; do
+      listening_on "$DEV_PORT" && break
+      kill -0 "$DEV_PID" 2>/dev/null || break   # dev server 起不来就别干等了
+      sleep 0.2
+      i=$((i + 1))
+    done
+    if ! listening_on "$DEV_PORT"; then
+      echo ""
+      echo "✗ dev server 没能在 127.0.0.1:${DEV_PORT} 上起来（端口被占？依赖没装？）。"
+      echo "   可手动排查：cd frontend && pnpm run dev"
+      [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+      printf '按回车键关闭窗口… '
+      read -r _pause
+      exit 1
+    fi
+  fi
+fi
+
+echo ""
+echo "页面      → ${PAGE_URL}"
+echo "接口文档  → ${URL}/docs"
 echo "按 Ctrl+C 停止服务。"
 echo ""
+open_url
 
-"${PY}" -m app serve &
-SERVER_PID=$!
-
-# 等端口真的监听起来再打开页面；最多等 5 秒。
-i=0
-while [ $i -lt 25 ]; do
-  listening && break
-  kill -0 "$SERVER_PID" 2>/dev/null || break   # 进程已经挂了，不必再等
-  sleep 0.2
-  i=$((i + 1))
-done
-
-if listening; then
-  open_url
-else
-  echo ""
-  echo "✗ 服务没能在 127.0.0.1:${PORT} 上起来，页面不打开。上面的报错就是原因。"
-  echo "  排查端口占用：lsof -nP -iTCP:${PORT} -sTCP:LISTEN"
-  kill "$SERVER_PID" 2>/dev/null
-  printf '按回车键关闭窗口… '
-  read -r _pause
-  exit 1
-fi
-
-wait "$SERVER_PID"
-CODE=$?
-
-# Ctrl+C 会让子进程带 130 退出，这是正常停止，不用报警。
-if [ "$CODE" -eq 0 ] || [ "$CODE" -eq 130 ]; then
-  echo ""
-  echo "服务已停止。"
-  exit 0
-fi
-
-echo ""
-echo "服务异常退出（退出码 ${CODE}）。"
-printf '按回车键关闭窗口… '
-read -r _pause
-exit "$CODE"
+# Ctrl+C（SIGINT）会发给整个前台进程组，我们自己起的后端与 dev server 都会收到。
+# 这里再补一次显式清理，保证异常退出时不留下孤儿进程；复用的旧服务不归我们管，不动。
+cleanup() {
+  if [ -n "$DEV_PID" ]; then
+    pkill -P "$DEV_PID" 2>/dev/null
+    kill "$DEV_PID" 2>/dev/null
+  fi
+  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+}
+trap 'echo; echo "服务已停止。"; cleanup; exit 0' INT TERM
+wait

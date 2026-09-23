@@ -20,10 +20,10 @@ from app.services.review_pool import ReviewPool
 logger = get_logger('cli')
 
 
-def serve(host: str = HOST, port: int = PORT, reload: bool = False) -> None:
+def serve(host: str = HOST, port: int = PORT, reload: bool = True) -> None:
     import uvicorn
 
-    print('恋爱职场大侦探 {} 启动中 → http://{}:{}   （Ctrl+C 停止）'.format(VERSION, host, port))
+    print('恋爱·职场聊天神器 {} 启动中 → http://{}:{}   （Ctrl+C 停止）'.format(VERSION, host, port))
     print('接口文档：http://{}:{}/docs'.format(host, port))
     uvicorn.run('app.main:app', host=host, port=port, reload=reload, log_level='info')
 
@@ -139,12 +139,12 @@ def show_pool() -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='python -m app', description='恋爱职场大侦探 本地服务与工具')
+    parser = argparse.ArgumentParser(prog='python -m app', description='恋爱·职场聊天神器 本地服务与工具')
     sub = parser.add_subparsers(dest='command')
     serve_parser = sub.add_parser('serve', help='启动本地服务（默认）')
     serve_parser.add_argument('--host', default=HOST)
     serve_parser.add_argument('--port', type=int, default=PORT)
-    serve_parser.add_argument('--reload', action='store_true', help='改代码自动重启（开发用）')
+    serve_parser.add_argument('--no-reload', action='store_true', help='关闭改代码自动重启（默认开，开发热重载）')
     sub.add_parser('check', help='跑夹具回归（data/cases.json）')
     sub.add_parser('pool', help='查看低置信度回流池')
     return parser
@@ -156,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_check()
     if args.command == 'pool':
         return show_pool()
-    serve(getattr(args, 'host', HOST), getattr(args, 'port', PORT), getattr(args, 'reload', False))
+    reload = not getattr(args, 'no_reload', False)
+    serve(getattr(args, 'host', HOST), getattr(args, 'port', PORT), reload)
     return 0
 
 

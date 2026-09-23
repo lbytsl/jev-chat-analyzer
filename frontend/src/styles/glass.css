@@ -80,6 +80,19 @@ header b{letter-spacing:-.01em}
   box-shadow:0 2px 8px rgba(15,23,42,.10),var(--top-sheen);
 }
 
+/* GitHub 快捷跳转：外观与「配置」按钮同源，做成同高的方形图标按钮。 */
+.gh-link{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--glass-edge);
+  box-shadow:var(--elev-sm),var(--top-sheen);
+  transition:background .15s,box-shadow .15s;
+}
+.gh-link:hover{
+  background:rgba(255,255,255,.96);
+  border:1px solid var(--glass-edge);
+  box-shadow:0 2px 8px rgba(15,23,42,.10),var(--top-sheen);
+}
+
 /* ===== 3. 聊天主体 ===== */
 .wx-wrap{border-radius:20px}
 .wx{
@@ -105,6 +118,8 @@ header b{letter-spacing:-.01em}
   color:#7c7c85;
   padding:6px 10px;
 }
+.wx-search::placeholder{color:#8e8e96}
+.wx-search:focus{outline:none;background:rgba(255,255,255,.92);box-shadow:0 0 0 3px rgba(7,193,96,.14)}
 .wx-item{border-radius:9px;transition:background .15s}
 .wx-item:hover{background:rgba(118,118,128,.08)}
 .wx-item.on,.session-item.on{background:rgba(118,118,128,.17)}
@@ -216,6 +231,11 @@ button{border-radius:10px}
   border-radius:8px;
 }
 .session-new:hover,.session-manage:hover,.session-act:hover{background:rgba(255,255,255,.98)}
+/* 「管理」选中态（.on）是绿底白字，但上面这条 hover 会把背景刷成近白色，文字仍是白色
+   → 悬浮时字就看不见了。用更高优先级把 .on 锁回绿色系。 */
+.session-manage.on,
+.session-manage.on:hover{background:#07c160;border-color:#07c160;color:#fff}
+.session-manage.on:hover{background:#06ad56;border-color:#06ad56}
 .session-bar{background:rgba(255,255,255,.72);border-radius:9px}
 .session-tag{background:rgba(118,118,128,.14);border-radius:5px}
 

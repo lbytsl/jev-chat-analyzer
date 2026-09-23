@@ -1,4 +1,4 @@
-# 恋爱职场大侦探
+# 恋爱·职场聊天神器
 
 一个本地运行的聊天记录分析小工具：把一段对话粘进来，自动识别每句话的**意图**和**情绪**，并（可选）生成**潜台词**和**若干条回复建议**。覆盖暧昧、恋爱、同事、上下级四种关系场景。
 
@@ -22,28 +22,45 @@
 
 ## 快速开始
 
+### 1. 安装依赖（macOS / Windows 都要）
+
+后端用 [uv](https://docs.astral.sh/uv/) 管理依赖，前端用 [pnpm](https://pnpm.io/)（需先装 Node.js）。
+
 ```bash
 git clone <你的仓库地址>
-cd 恋爱职场大侦探
-brew install uv                           # 后端用 uv 管理依赖（ macOS 一行装好，其它平台见 uv 官网）
-uv sync --no-dev                           # 按 pyproject.toml 同步依赖，自动建 .venv（启动用不到测试包）
-cp .env.example .env                       # 填入你的 API 配置（见下方）
+cd jev-chat-analyzer
 
-cd frontend && pnpm install && pnpm run build && cd ..   # 前端（Vite + Vue 3），包管理用 pnpm，产物在 frontend/dist
-.venv/bin/python -m app serve              # 默认监听 127.0.0.1:8767
+# 后端：装好 uv 后同步依赖。macOS: brew install uv；Windows: winget install astral-sh.uv 或 pip install uv
+uv sync --no-dev                           # 按 pyproject.toml 同步依赖，自动建 .venv（启动用不到测试包）
+cp .env.example .env                       # 填入你的 API 配置（见下方「配置」一节）
+
+# 前端：装好 Node.js 后全局装 pnpm（npm i -g pnpm），再装前端依赖
+cd frontend && pnpm install && cd ..       # 前端（Vite + Vue 3）
 ```
 
-浏览器打开 <http://127.0.0.1:8767> 即可使用；接口文档在 <http://127.0.0.1:8767/docs>。
+### 2. 启动（两种平台，二选一）
 
-macOS 上也可以直接双击「启动.command」：它会优先用项目里的 `.venv`，`frontend/dist` 不存在时自动构建前端，起服务后自动打开页面。若端口上已有服务，它不会盲目复用，而是判断该不该重启：既比对版本号，也比对「`app/` 下最新的 `.py` 是否比进程启动时间新」——所以改完后端忘了重启时（哪怕版本号没变）它会提示你，不会静默用着旧进程。
+**一键脚本（推荐）**
 
-改前端时用开发模式，热更新 + 直接连本机 8767 的后端（后端 CORS 已允许 localhost 任意端口）：
+- **macOS**：直接双击 `启动.command`。它会用项目里的 `.venv` 起后端（8767）、用 `pnpm run dev` 起前端 dev server（5173）、自动打开页面 —— 改完前端刷新即见，不用手动 build。若后端端口已有旧代码，会提示你重启而不是静默复用（比对版本号 + 「`app/` 下最新 `.py` 是否比进程启动时间新」）。找不到 pnpm 时退回「构建产物 + 后端托管」，页面开 8767。
+- **Windows**：直接双击 `start.bat`，效果同上（后端 8767 + 前端 dev server 5173，自动开页面）。关闭弹出的「jev-backend」「jev-frontend」两个窗口即停止服务；找不到 pnpm 时同样退回「构建产物 + 后端托管」，页面开 8767。
+
+**手动启动（跨平台）**：开两个终端，
 
 ```bash
-cd frontend && npm run dev                 # http://localhost:5173
+.venv/bin/python -m app serve             # 后端 API，监听 127.0.0.1:8767（Windows 用 .venv\Scripts\python.exe）
+cd frontend && pnpm run dev               # 另一个终端：前端 dev server，http://127.0.0.1:5173
 ```
 
-> 页面只从服务地址打开（http://127.0.0.1:8767）或走 Vite dev server；前端现在是构建产物，双击 `frontend/index.html` 不可用。
+浏览器打开 <http://127.0.0.1:5173> 即可使用（dev server 直连 8767 的后端）；接口文档在 <http://127.0.0.1:8767/docs>。
+
+改前端时用开发模式，热更新 + 直接连本机 8767 的后端（后端 CORS / origin 白名单已放行 localhost 任意端口）：
+
+```bash
+cd frontend && pnpm run dev                # http://127.0.0.1:5173
+```
+
+> 页面只能从后端地址（http://127.0.0.1:8767，托管 `frontend/dist`）或 Vite dev server（http://127.0.0.1:5173）打开；双击 `frontend/index.html`（file://）不可用。想用单端口（8767）就先 `pnpm run build`，后端逐请求读 `frontend/dist`，重新构建后刷新即生效。
 
 > `.env` 放在项目根目录即可；若放在项目上一级目录也能被读到（兼容旧布局）。
 
@@ -200,7 +217,8 @@ app/
 | `tests/` | pytest：领域层 / 服务层 / 仓储层 / 接口契约，全部用假上游，不烧额度 |
 | `scripts/measure_decisive.py` | 量分差与大类分布的实验脚本 |
 | `var/` | 运行产物：`sessions.db`（会话库）· `low_confidence_pool.json` · `regression/`，已 gitignore |
-| `启动.command` | macOS 一键启动脚本（含前端自动构建） |
+| `启动.command` | macOS 一键启动脚本（后端 8767 + 前端 dev server 5173） |
+| `start.bat` | Windows 一键启动脚本（后端 8767 + 前端 dev server 5173） |
 | `四场景对话样本_40条.txt` | 测试语料 |
 | `.env.example` | 配置模板（无密钥） |
 | `pyproject.toml` `uv.lock` | 后端依赖清单（uv 管理，含 `httpx[socks]`，见下） |
@@ -251,7 +269,8 @@ app/
 .venv/bin/python -m app pool        # 查看低置信度回流池里待人工审的样本
 .venv/bin/python scripts/measure_decisive.py   # 量各层分差与大类分布（会真实调用模型）
 
-cd frontend && pnpm run build        # 改完前端必须重新构建，页面才会变（后端会逐请求读 dist）
+cd frontend && pnpm run dev          # 开发模式（http://127.0.0.1:5173，改完刷新即见）
+cd frontend && pnpm run build        # 单端口模式：构建到 frontend/dist，由后端在 8767 托管
 ```
 
 `app check` 会真实调用 Jev（每条消息两次），改提示词后跑一遍再用。

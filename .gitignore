@@ -33,7 +33,9 @@ frontend/dist/
 var/
 low_confidence_pool.json
 
-# ===== 内部实现笔记（非开源文档，不传） =====
+# ===== Playwright CLI 录制产物（自动化临时文件，非源码） =====
+.playwright-cli/
+
 实现说明.md
 标签提案-恋爱补充.md
 .idea/.gitignore

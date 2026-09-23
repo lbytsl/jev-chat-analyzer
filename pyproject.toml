@@ -1,7 +1,7 @@
 [project]
 name = "jev-chat-analyzer"
 version = "0.0.8"
-description = "恋爱职场大侦探：本地运行的聊天记录意图 / 情绪分析工具"
+description = "恋爱·职场聊天神器：本地运行的聊天记录意图 / 情绪分析工具"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

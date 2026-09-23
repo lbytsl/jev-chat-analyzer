@@ -98,7 +98,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 def create_app() -> FastAPI:
     configure_logging()
     app = FastAPI(
-        title='恋爱职场大侦探 API',
+        title='恋爱·职场聊天神器 API',
         version=VERSION,
         description='本地聊天记录分析：Jev 做意图/情绪分类，OpenAI 兼容端点做潜台词与回复建议。',
         docs_url='/docs',

@@ -1,7 +1,8 @@
 :root{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;color:#202027;background:#f6f7fb;font-size:16px}*{box-sizing:border-box}html,body{height:100%}body{margin:0;display:flex;flex-direction:column}[hidden]{display:none!important}
 header{padding:16px 5vw;border-bottom:1px solid #dddde7;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;flex:none}header b{font-size:17px}
 small,.muted{color:#686876;font-size:14px}
-main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;width:100%;max-width:1240px;margin:0 auto;padding:14px 20px 18px}
+/* 主体宽度占视口 90%（header 的内边距是 5vw，两侧刚好对齐成同一条边）。 */
+main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;width:90%;max-width:none;margin:0 auto;padding:14px 0 18px}
 label{display:block;margin:18px 0 8px;font-weight:600;font-size:13px}
 textarea,select{font:inherit;font-size:13px;width:100%;border:1px solid #d6d6e1;background:#fafaff;border-radius:12px;padding:12px;color:inherit}
 textarea{resize:vertical;min-height:105px;line-height:1.6}
@@ -19,10 +20,12 @@ button:hover{border-color:#c3c3cc}button:disabled{opacity:.55;cursor:wait}
 .toggle input{margin-top:3px;width:16px;height:16px;flex:none;accent-color:#07c160}
 .notice{border:1px solid #f0c9a0;background:#fff6ec;color:#8a5308;border-radius:14px;padding:14px 16px;line-height:1.7;margin:0 0 18px;font-size:14px}#notice[hidden]{display:none}
 .wx-wrap{position:relative;overflow:hidden;border-radius:8px;flex:1 1 auto;min-height:280px}
-.wx{display:grid;grid-template-columns:196px 1fr;grid-template-rows:100%;background:#fff;border:1px solid #dcdcdc;border-radius:8px;overflow:hidden;height:100%}
+.wx{display:grid;grid-template-columns:260px 1fr;grid-template-rows:100%;background:#fff;border:1px solid #dcdcdc;border-radius:8px;overflow:hidden;height:100%}
 .wx-side{background:#ededed;border-right:1px solid #dcdcdc;padding:12px 10px;min-height:0;overflow-y:auto}
 .wx-side .brand{font-size:14px;font-weight:600;margin-bottom:12px}
-.wx-search{background:#dcdcdc;border-radius:4px;padding:5px 9px;color:#7f7f7f;font-size:12px;margin-bottom:12px}
+/* 搜索框现在是真正的 input：补上输入框才需要的宽度 / 去边框 / 字体继承。 */
+.wx-search{width:100%;border:0;outline:none;background:#dcdcdc;border-radius:4px;padding:5px 9px;color:#7f7f7f;font-size:12px;margin-bottom:12px;font-family:inherit;box-sizing:border-box;appearance:none;-webkit-appearance:none}
+.wx-search::placeholder{color:#9a9aa2}
 .wx-item{display:flex;gap:9px;align-items:center;padding:9px 8px;border-radius:4px}
 .wx-item.on{background:#c9c9c9}
 .wx-item b{display:block;font-size:14px;font-weight:400}
@@ -157,6 +160,11 @@ button:hover{border-color:#c3c3cc}button:disabled{opacity:.55;cursor:wait}
 .badge.ok::before{background:#07c160}
 .badge.warn::before{background:#e6a23c}
 .badge.bad::before{background:#e45649}
+/* 顶栏右侧：GitHub 快捷跳转 + 配置按钮，成组靠右对齐。 */
+.header-right{display:flex;align-items:center;gap:10px}
+.gh-link{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:9px;color:#202027;text-decoration:none}
+.gh-link svg{width:20px;height:20px;display:block}
+.gh-link:focus-visible{outline:2px solid #07c160;outline-offset:2px}
 /* AI 开关置灰时给一行说明，避免「功能不见了」的误会。 */
 .toggle.off{opacity:.6}
 .toggle.off input{cursor:not-allowed}
@@ -207,7 +215,7 @@ button:focus-visible{outline:2px solid #07c160;outline-offset:2px}
 
 /* ===== 无头像：消息行只剩「名字 + 气泡 + 单句按钮」，列宽相应放宽 ===== */
 .row{gap:0}
-.col{max-width:84%}
+.col{max-width:90%}
 .wx-item.session-item{padding-left:8px}
 
 /* ===== 单句潜台词：按钮贴在消息气泡右侧 ===== */
@@ -278,11 +286,11 @@ button:focus-visible{outline:2px solid #07c160;outline-offset:2px}
 
 /* ===== 窄屏兜底 ===== */
 @media (max-width:820px){
-  main{padding:12px 12px 14px}
-  .wx{grid-template-columns:150px 1fr}
+  main{padding:12px 0 14px}
+  .wx{grid-template-columns:200px 1fr}
   .session-preview,.session-meta{display:none}
   .drawer{width:100%}
-  .col{max-width:88%}
+  .col{max-width:90%}
 }
 @media (max-width:520px){
   header{padding:12px 4vw}
