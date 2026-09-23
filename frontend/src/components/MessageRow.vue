@@ -43,10 +43,29 @@ const inlineSuggestions = computed(() => {
 function onContextMenu(event) {
   emit('menu', { index: props.message.index, x: event.clientX, y: event.clientY })
 }
+
+/**
+ * 键盘打开同一个菜单：Shift+F10 与「菜单键」是 Windows 上的标准操作。
+ * 挂在整行上（事件从行内的按钮冒泡上来），所以不额外增加 tab 停留点——
+ * 焦点本来就在这一行的「生成潜台词」按钮上时就能按出来。
+ */
+function onKeydown(event) {
+  const isMenuKey = event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')
+  if (!isMenuKey) return
+  event.preventDefault()
+  const rect = event.currentTarget.getBoundingClientRect()
+  emit('menu', { index: props.message.index, x: rect.left + 24, y: rect.top + 24,
+                 fromKeyboard: true })
+}
 </script>
 
 <template>
-  <div class="row" :class="{ me: mine }" @contextmenu.prevent="onContextMenu">
+  <div
+    class="row"
+    :class="{ me: mine }"
+    @contextmenu.prevent="onContextMenu"
+    @keydown="onKeydown"
+  >
     <div class="col">
       <span class="bub-name">{{ displayName }}</span>
       <div class="bub-line">

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from app.api.deps import (
     get_settings_service,
 )
 from app.api.errors import auth_hint, jev_api_error_message
-from app.core.config import FRONTEND_INDEX, VERSION
+from app.core.config import FRONTEND_INDEX, MAX_BODY_BYTES, VERSION
 from app.core.exceptions import (
     GeneralLLMError,
     InvalidRequest,
@@ -156,6 +157,25 @@ class TestGuards:
             '/analyze-chat', data='transcript=x', headers={'Content-Type': 'text/plain'})
         assert response.status_code == 403
         assert response.json() == {'error': '请求来源不正确'}
+
+    def test_oversized_body_is_rejected(self):
+        payload = {'transcript': 'x' * (MAX_BODY_BYTES + 1), 'relationship': '恋爱'}
+        response = make_client(FakePipeline()).post('/analyze-chat', json=payload, headers=JSON)
+        assert response.status_code == 400
+        assert response.json() == {'error': '输入过长或为空'}
+
+    def test_body_without_content_length_is_rejected(self):
+        """分块传输（没有 Content-Length）一律拒掉。
+
+        这条同时钉住一个容易想歪的点：HTTP/1.1 里 Content-Length 是**成帧依据**，
+        uvicorn 的 h11 只会按它读 body，所以「谎报一个很小的 Content-Length 就能把
+        超大 body 塞进来」并不成立；真正漏的是「根本没有长度」这条路径。
+        """
+        body = json.dumps({'transcript': TRANSCRIPT, 'relationship': '恋爱'}).encode('utf-8')
+        response = make_client(FakePipeline()).post(
+            '/analyze-chat', content=iter([body]), headers=JSON)
+        assert response.status_code == 400
+        assert response.json() == {'error': '输入过长或为空'}
 
     @pytest.mark.parametrize('path,payload', [
         ('/analyze', {'message': '在吗', 'context': '', 'relationship': '恋爱'}),

@@ -32,7 +32,10 @@ from typing import Callable
 from app.clients.general_llm import GeneralLLMClient
 from app.core.config import clamp_suggestions_count, get_settings
 from app.core.exceptions import GeneralLLMError
+from app.core.logging import get_logger
 from app.domain.prompts import build_interpretation_messages, build_suggestions_messages
+
+logger = get_logger('generation')
 
 INTENT_DETAIL_MAX = 24
 
@@ -126,6 +129,18 @@ class SuggestionsContent:
         return {'suggestions': list(self.suggestions)}
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationOutcome:
+    """一次生成的结果：成功给 `content`，失败给 `error`，两者互斥。"""
+
+    content: InterpretationContent | SuggestionsContent | None = None
+    error: str = ''
+
+    @property
+    def ok(self) -> bool:
+        return self.content is not None
+
+
 class GenerationService:
     def __init__(self, client: GeneralLLMClient | None = None, settings=None):
         self._settings = settings or get_settings()
@@ -141,8 +156,11 @@ class GenerationService:
                                 ) -> InterpretationContent:
         system, user = build_interpretation_messages(
             relationship, context, message, speaker, intent_result, emotion_result)
+
         # 成功条件：拿到 intent_detail 键即可（空字符串是合法结果 = 这句没有潜台词）。
-        accept = lambda payload: 'intent_detail' in payload
+        def accept(payload: dict) -> bool:
+            return 'intent_detail' in payload
+
         if on_event is None:
             parsed = self._client.complete_json(system, user, accept=accept)
         else:
@@ -150,6 +168,24 @@ class GenerationService:
             parsed = self._client.stream_json(system, user, accept=accept,
                                               on_delta=watch, on_reset=reset)
         return self._shape_interpretation(parsed)
+
+    def run_interpretation(self, relationship, context, message, speaker, intent_result,
+                           emotion_result, on_event: Callable[[dict], None] | None = None
+                           ) -> GenerationOutcome:
+        """`generate_interpretation` 的「不抛」版本：失败也返回 outcome，错误文案在 `error` 里。
+
+        为什么要有这一层：`try/except GeneralLLMError + 记日志` 原本在 classifier 与 pipeline
+        里各抄了一遍（一共四处），抄漏一处就会出现「潜台词失败却标了推荐回复失败」这种错位。
+        失败**字段名**仍由各自的调用方定义——两边契约不同（一条消息的结果 vs 一次补跑的增量），
+        硬合并反而会把人绕进去。
+        """
+        try:
+            return GenerationOutcome(content=self.generate_interpretation(
+                relationship, context, message, speaker, intent_result, emotion_result,
+                on_event=on_event))
+        except GeneralLLMError as exc:
+            logger.warning('潜台词生成失败：%s', exc)
+            return GenerationOutcome(error=str(exc))
 
     @staticmethod
     def _shape_interpretation(parsed: dict) -> InterpretationContent:
@@ -198,7 +234,11 @@ class GenerationService:
         count = self.suggestions_count()
         system, user = build_suggestions_messages(
             relationship, context, message, speaker, intent_result, emotion_result, count=count)
-        accept = lambda payload: bool(payload.get('suggestions'))
+
+        # 成功条件：至少有一条可用的建议（整形后可能全被丢掉，那时按失败处理）。
+        def accept(payload: dict) -> bool:
+            return bool(payload.get('suggestions'))
+
         if on_event is None:
             parsed = self._client.complete_json(system, user, accept=accept)
         else:
@@ -206,6 +246,18 @@ class GenerationService:
             parsed = self._client.stream_json(system, user, accept=accept,
                                               on_delta=watch, on_reset=reset)
         return self._shape_suggestions(parsed, count)
+
+    def run_suggestions(self, relationship, context, message, speaker, intent_result,
+                        emotion_result, on_event: Callable[[dict], None] | None = None
+                        ) -> GenerationOutcome:
+        """`generate_suggestions` 的「不抛」版本（口径同 `run_interpretation`）。"""
+        try:
+            return GenerationOutcome(content=self.generate_suggestions(
+                relationship, context, message, speaker, intent_result, emotion_result,
+                on_event=on_event))
+        except GeneralLLMError as exc:
+            logger.warning('推荐回复生成失败：%s', exc)
+            return GenerationOutcome(error=str(exc))
 
     @staticmethod
     def _suggestions_watcher(on_event: Callable[[dict], None], count: int

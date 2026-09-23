@@ -22,7 +22,6 @@ from app.core.config import (
     VERSION,
 )
 from app.core.exceptions import (
-    GeneralLLMError,
     InvalidRequest,
     JevResponseError,
 )
@@ -38,7 +37,7 @@ from app.domain.labels import (
 from app.domain.prompts import build_classification_questions
 from app.services.generation import GenerationService
 
-logger = get_logger('gen')
+logger = get_logger('classifier')
 
 
 class ClassifierService:
@@ -157,34 +156,37 @@ class ClassifierService:
             'input': state,
         }
 
-    def _run_generation(self, state, relationship, speaker, primary_intent, emotion_result,
+    def _run_generation(self, state: dict, relationship: str, speaker: str,
+                        primary_intent: dict, emotion_result: dict,
                         want_interpretation: bool, want_suggestions: bool,
                         on_generation: Callable[[dict], None] | None = None) -> dict:
-        """两条互不牵连的生成调用：各自 try，各自标记失败。"""
+        """两条互不牵连的生成调用：各自跑、各自标记失败。
+
+        失败字段名只在这里定义一次（`interpretation_failed` vs `gen_failed`）：混用会让
+        「潜台词挂了」显示成「回复建议失败」。try/except 与日志已收进 GenerationService。
+        """
         gen = {'interpretation': None, 'intent_detail': None, 'emotion_detail': None,
                'suggestions': None, 'gen_failed': False, 'interpretation_failed': False,
                'gen_error': None}
         context, message = state.get('context', ''), state.get('message', '')
         if want_interpretation:
-            try:
-                content = self._generation.generate_interpretation(
-                    relationship, context, message, speaker, primary_intent, emotion_result,
-                    on_event=on_generation)
-                gen.update(content.to_dict())
-            except GeneralLLMError as exc:
-                logger.warning('潜台词生成失败：%s', exc)
+            outcome = self._generation.run_interpretation(
+                relationship, context, message, speaker, primary_intent, emotion_result,
+                on_event=on_generation)
+            if outcome.ok:
+                gen.update(outcome.content.to_dict())
+            else:
                 gen['interpretation_failed'] = True
-                gen['gen_error'] = str(exc)
+                gen['gen_error'] = outcome.error
         if want_suggestions:
-            try:
-                content = self._generation.generate_suggestions(
-                    relationship, context, message, speaker, primary_intent, emotion_result,
-                    on_event=on_generation)
-                gen['suggestions'] = content.suggestions
-            except GeneralLLMError as exc:
-                logger.warning('推荐回复生成失败：%s', exc)
+            outcome = self._generation.run_suggestions(
+                relationship, context, message, speaker, primary_intent, emotion_result,
+                on_event=on_generation)
+            if outcome.ok:
+                gen['suggestions'] = outcome.content.suggestions
+            else:
                 gen['gen_failed'] = True
-                gen['gen_error'] = str(exc)
+                gen['gen_error'] = outcome.error
         return gen
 
     # ---------- 组装 ----------

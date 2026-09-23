@@ -22,6 +22,7 @@
 - **流式体验**：整段分析卡片一条条出现（每条算完就推），潜台词逐字写出来、回复建议逐条冒出来；正在生成的那几条在卡片上显示「生成中…」。
 - **会话持久记忆**：每次导入的聊天记录自动存进本地会话库，左侧可切换历史会话、多选删除；刷新页面会回到最近一条。
 - **继续记录**：分析完可追加新消息，只对新增部分重新分析，旧结果保留。
+- **导出**：工具栏「导出」把这次分析存成 Markdown（说话人 / 正文 / 意图 / 情绪 / 潜台词 / 回复建议）；纯前端拼接，不发请求。
 - **低置信度回流**：分类拿不准或命中泛化标签的样本写入本地池，供人工审阅补标签。
 
 ## 快速开始
@@ -184,17 +185,31 @@ frontend/
     ├── App.vue         页面骨架 + 状态编排（谁在分析、抽屉、回复面板、弹窗、会话切换）
     ├── api/client.js   /health /analyze-chat /interpret-chat /suggest-chat /append-chat /sessions*
     │                   （含 streamAPI：读 SSE，fetch + ReadableStream 手写分帧），统一错误分类
-    ├── composables/
-    │   ├── usePeople.js    说话人推断与「我是谁 / 解读谁」的自动勾选状态机
-    │   ├── useAnalysis.js  整段分析 / 补跑潜台词 / 补跑推荐回复 / 单条生成 / 追加消息 / 会话还原
-    │   └── useSessions.js  会话列表、当前会话、多选删除
+    ├── stores/         Pinia 状态，组件直连，不再层层传 props
+    │   ├── form.js         正文 / 关系（场景）/ 两个 AI 勾选
+    │   ├── people.js       说话人推断与「我是谁 / 解读谁」的自动勾选状态机（输入防抖）
+    │   ├── sessions.js     会话列表、当前会话、多选删除
+    │   ├── analysis.js     分析结果与流生命周期（整段 / 补跑 / 单条 / 追加 / 导出）
+    │   └── ui.js           浮层开关、追加草稿、复制状态
+    ├── composables/    只剩两件「不是状态」的东西
+    │   ├── useSessionSwitch.js  跨 store 编排：打开 / 清空 / 新建导入 / 删除会话
+    │   └── useFocusTrap.js      模态里的键盘焦点陷阱与归还
     ├── components/     ChatSidebar（会话列表）· ChatFlow · MessageRow · AnalysisNote
-    │                   ReplyDock · ImportDrawer · AugmentBar · AppendModal
-    ├── styles/main.css 样式（旧版逐字保留 + 会话列表/单句按钮等新增段）
-    └── utils/          transcript.js（与后端 domain/transcript.py 同规则）· clipboard.js · time.js
+    │                   ReplyDock · ImportDrawer · AugmentBar · AppendModal · SettingsDrawer
+    ├── styles/         main.css（布局）· glass.css（外观）
+    └── utils/          transcript.js（与后端 domain/transcript.py 同规则）· clipboard.js
+                        time.js · export.js（导出 Markdown）
 ```
 
+单测（`pnpm run test`，vitest + jsdom）覆盖纯逻辑层（`stores/*.test.js`、`utils/export.test.js`），
+外加 `App.smoke.test.js`——它真的把整页挂到 jsdom 上跑一次，专门用来接住「store 接线拧了」
+这类只在挂载时才炸的问题（构建只看语法，看不到这些）。组件的视觉与交互仍靠
+`pnpm run build` + 手工过一遍页面。
+
 前端只做展示与编排：分类、提示词、标签库全在后端。唯一「两侧同规则」的地方是说话人识别——前端要实时显示 chips，所以 `utils/transcript.js` 和后端 `domain/transcript.py` 必须同步改（两边都留着这条注释）。
+
+两侧靠 `data/transcript_cases.json` 这组共享用例兜底：后端 `tests/test_transcript_consistency.py`、
+前端 `pnpm run check:transcript` 各跑一遍同一份用例，只改一侧会有一边红。
 
 ### 后端
 
@@ -223,9 +238,11 @@ app/
 │   ├── prompts.py    全部提示词：分类层 questions + 潜台词 / 推荐回复两套 system·user
 │   └── transcript.py 聊天记录解析（标签式 / 微信复制式）
 ├── clients/          外部依赖
-│   ├── jev.py        Jev 分类网关（端点解析、重试、错误映射）
+│   ├── http.py       进程级共享 httpx.Client（连接池复用、分项超时）
+│   ├── jev.py        Jev 分类网关（端点解析、重试、错误映射、单次调用总预算）
 │   └── general_llm.py OpenAI 兼容生成层（截断重试、JSON 抠取）
 └── core/             配置（config）· 异常（exceptions）· 日志（logging）
+                      · 共享线程池（executors）· 重试退避口径（retry）
 ```
 
 几个刻意的取舍：
@@ -243,7 +260,10 @@ app/
 | `frontend/` | 前端源码（Vite + Vue 3，构建产物 `frontend/dist` 已 gitignore） |
 | `data/intents_seed.json` | 意图 / 情绪标签库（含各场景叫法） |
 | `data/cases.json` | 回归测试夹具 |
-| `tests/` | pytest：领域层 / 服务层 / 仓储层 / 接口契约，全部用假上游，不烧额度 |
+| `data/transcript_cases.json` | 说话人识别的「前后端一致性」用例（两侧跑同一份） |
+| `tests/` | pytest：领域层 / 服务层 / 仓储层 / 接口契约 / 上游客户端，全部用假上游，不烧额度 |
+| `.github/workflows/ci.yml` | CI：后端 ruff + pytest + 覆盖率，前端 install + 一致性 + lint + 单测 + 构建（离线） |
+| `.pre-commit-config.yaml` | 提交前钩子：ruff + YAML / 大文件 / 私钥检查 |
 | `scripts/measure_decisive.py` | 量分差与大类分布的实验脚本 |
 | `var/` | 运行产物：`sessions.db`（会话库）· `low_confidence_pool.json` · `regression/`，已 gitignore |
 | `启动.command` | macOS 一键启动脚本（后端 8767 + 前端 dev server 5173） |
@@ -294,13 +314,24 @@ app/
 
 ```bash
 .venv/bin/python -m pytest          # 离线测试套件（假上游，不消耗额度）
+.venv/bin/python -m pytest --cov    # 同上，附覆盖率（门槛见 pyproject 的 [tool.coverage]）
+.venv/bin/ruff check .              # 静态检查（规则集钉在 pyproject 的 [tool.ruff.lint]，当前全绿）
 .venv/bin/python -m app check       # 跑 data/cases.json 夹具回归，结果写 var/regression/test-results.json
 .venv/bin/python -m app pool        # 查看低置信度回流池里待人工审的样本
 .venv/bin/python scripts/measure_decisive.py   # 量各层分差与大类分布（会真实调用模型）
 
 cd frontend && pnpm run dev          # 开发模式（http://127.0.0.1:5173，改完刷新即见）
 cd frontend && pnpm run build        # 单端口模式：构建到 frontend/dist，由后端在 8767 托管
+cd frontend && pnpm run lint         # eslint（0 问题为准）
+cd frontend && pnpm run test         # vitest：composables / utils 的纯逻辑单测
+cd frontend && pnpm run check:transcript   # 说话人识别的前后端一致性用例（改 transcript.js 后跑）
 ```
+
+提交前还可以挂上 pre-commit（`uv tool install pre-commit && pre-commit install`），
+它跑的就是上面这几条里最容易被忘掉的两个：ruff 与那几个 YAML / 密钥检查。
+
+> 以上命令与 `.github/workflows/ci.yml` 里的步骤一一对应；CI 全程离线，不需要任何 API key。
+> 改前端记得两件事：`pnpm run lint` 要 0 问题，改说话人识别规则要跑 `check:transcript`。
 
 `app check` 会真实调用 Jev（每条消息两次），改提示词后跑一遍再用。
 

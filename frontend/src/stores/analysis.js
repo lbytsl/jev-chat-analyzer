@@ -1,6 +1,11 @@
-import { computed, ref } from 'vue'
+import { defineStore, storeToRefs } from 'pinia'
+import { computed, ref, triggerRef } from 'vue'
 
-import { ApiError, appendChat, fetchHealth, streamAPI } from '@/api/client'
+import { ApiError, appendChat, fetchHealth, isCancelled, streamAPI } from '@/api/client'
+import { useFormStore } from '@/stores/form'
+import { usePeopleStore } from '@/stores/people'
+import { useSessionsStore } from '@/stores/sessions'
+import { downloadText, exportFilename, toMarkdown } from '@/utils/export'
 
 /**
  * 分析动作的状态机：整段分析 / 补跑潜台词 / 补跑推荐回复 / 追加新消息。
@@ -16,10 +21,19 @@ import { ApiError, appendChat, fetchHealth, streamAPI } from '@/api/client'
  * 带 session_id 时服务端会读库、合并、落库，并回传合并好的 `session`，前端直接渲染它
  * —— 前后端不会出现两份不一致的数据。
  */
-export function useAnalysis({
-  transcript, relationship, me, people, targets, genInterpretation, genSuggestions,
-  sessionId, onPersisted,
-}) {
+export const useAnalysisStore = defineStore('analysis', () => {
+  // 依赖直接取自其它 store。原来由 App 注入 8 个 ref（transcript / me / targets / sessionId…），
+  // 「这份状态归谁」只体现在 App 的调用参数里；现在 store 自己取用。
+  // 下面用到的别名刻意与旧参数同名，所以实现部分逐字未改——迁移保持机械，不顺手改行为。
+  const form = useFormStore()
+  const peopleStore = usePeopleStore()
+  const sessions = useSessionsStore()
+  const { transcript, relationship, genInterpretation, genSuggestions } = storeToRefs(form)
+  const { me, people, targets } = storeToRefs(peopleStore)
+  const sessionId = storeToRefs(sessions).currentId
+  // 每次结果落库后刷新侧栏（新会话 / 更新的时间与预览）。
+  const onPersisted = () => sessions.refresh()
+
   const lastData = ref(null)
   const analyzedText = ref('')
   const statusText = ref('')
@@ -73,6 +87,49 @@ export function useAnalysis({
     return !!(result.suggestions?.length || result.gen_failed || streaming || previewed)
   })
 
+  // 展示用的「我 / 对方」称呼：优先用记录里的原始标签（可能是真实昵称），没有就退回默认。
+  // 放在 store 里是因为消息行、回复面板、导出三处都要用同一份，别再各算一遍。
+  const names = computed(() => ({
+    me: lastData.value?.me_label || '我',
+    other: lastData.value?.other_label || '她',
+  }))
+
+  /**
+   * 导出当前这次分析为 Markdown。
+   *
+   * 纯前端拼接 + 下载，不经过后端：导出的是界面上已经看到的结论，
+   * 没必要为此再加一个端点（也就没有「导出的内容和屏幕不一致」的风险）。
+   */
+  function exportMarkdown() {
+    if (!lastData.value) return
+    downloadText(exportFilename(names.value), toMarkdown(lastData.value, names.value))
+    setStatus('已导出为 Markdown 文件。')
+  }
+
+  /**
+   * 在途的流式请求。取消要真取消：fetch 一断，后端才发现「客户端走了」，从而停止提交
+   * 后面的消息（否则关掉页面后它还会把剩下几十条 Jev 调用全跑完，白烧额度）。
+   *
+   * 用 Set 而不是单个 controller：右键「一键生成」会同时开潜台词与建议两条流。
+   */
+  const streams = new Set()
+
+  function beginStream() {
+    const controller = new AbortController()
+    streams.add(controller)
+    return controller
+  }
+
+  function endStream(controller) {
+    streams.delete(controller)
+  }
+
+  /** 切会话 / 重新导入 / 离开页面时调用：停掉所有在途的流。 */
+  function cancelStreams() {
+    for (const controller of streams) controller.abort()
+    streams.clear()
+  }
+
   function setStatus(text, isErr = false) {
     statusText.value = text
     statusErr.value = isErr
@@ -85,6 +142,9 @@ export function useAnalysis({
 
   function render(data, isNewResult = true) {
     lastData.value = data
+    // withItem / applyPreview 都是原地改的：对象引用没变时 ref 的 setter 不会触发，
+    // 这里显式通知一次，保证「把同一个对象再渲染一遍」也能生效。
+    triggerRef(lastData)
     renderTick.value += 1
     if (isNewResult) scrollTick.value += 1
   }
@@ -99,6 +159,7 @@ export function useAnalysis({
 
   /** 切到某条历史会话：整屏还原，不调用任何模型。 */
   function applySession(detail) {
+    cancelStreams()
     sessionId.value = detail.session_id || null
     analyzedText.value = detail.transcript || ''
     interpretErrors.value = {}
@@ -109,6 +170,7 @@ export function useAnalysis({
 
   /** 当前会话被删掉 / 清空时把界面收回到空态。 */
   function reset() {
+    cancelStreams()
     sessionId.value = null
     lastData.value = null
     analyzedText.value = ''
@@ -186,6 +248,7 @@ export function useAnalysis({
     busy.value = true
     setStatus(headline + '（共 ' + total + ' 条，请稍候…）')
     const sentText = transcript.value
+    const controller = beginStream()
     let done = null
     let received = 0
     try {
@@ -219,7 +282,7 @@ export function useAnalysis({
           return
         }
         applyPreview(event)
-      })
+      }, { signal: controller.signal })
       if (!done) throw new ApiError('分析没有正常结束，请重试。', 'app')
       analyzedText.value = sentText
       sessionId.value = done.session_id || sessionId.value
@@ -235,6 +298,8 @@ export function useAnalysis({
       onPersisted?.()
       return true
     } catch (err) {
+      // 主动取消（切会话 / 重新导入 / 离开页面）：静默收尾，既不报错也不覆盖状态栏。
+      if (isCancelled(err)) return false
       // 业务错误（400/500）必须显示出来：之前把提示清空了，看起来就像「点了没反应」。
       if (err.kind === 'app') {
         notice.value = ''
@@ -245,6 +310,7 @@ export function useAnalysis({
       }
       return false
     } finally {
+      endStream(controller)
       busy.value = false
     }
   }
@@ -275,22 +341,29 @@ export function useAnalysis({
     }
   }
 
-  /** `message` 事件 → 把这一条追加进当前骨架，并把计数与 reply_target 同步上。 */
+  /**
+   * `message` 事件 → 把这一条追加进当前骨架，并把计数与 reply_target 同步上。
+   *
+   * 原地追加（而不是 `[...analyses, item]` 造新数组）：50 条消息下每次重建整表累计是
+   * O(n²) 的拷贝，而且每次都要把整个 lastData 换掉、连带整屏 diff。
+   *
+   * 这里刻意**不用 shallowRef**：`lastData` 会作为 prop 传给 ChatFlow → MessageRow，
+   * 子组件靠「渲染时读到的深层属性」建立依赖；换成 shallowRef 后原地改内容不再触发
+   * 子组件更新（prop 引用没变），得反过来每次造新对象——那就把 O(n²) 又请回来了。
+   */
   function withItem(data, item) {
     if (!data) return data
-    const analyses = [...(data.analyses || []), item]
+    if (!Array.isArray(data.analyses)) data.analyses = []
+    data.analyses.push(item)
     const mine = item.speaker === '我'
     const lastIndex = (data.messages || []).reduce((max, message) => (
       message.index > max ? message.index : max), 0)
-    return {
-      ...data,
-      analyses,
-      count: analyses.length,
-      count_other: (data.count_other || 0) + (mine ? 0 : 1),
-      count_me: (data.count_me || 0) + (mine ? 1 : 0),
-      failed_count: 0,
-      reply_target: item.index === lastIndex ? item : data.reply_target,
-    }
+    data.count = data.analyses.length
+    data.count_other = (data.count_other || 0) + (mine ? 0 : 1)
+    data.count_me = (data.count_me || 0) + (mine ? 1 : 0)
+    data.failed_count = 0
+    if (item.index === lastIndex) data.reply_target = item
+    return data
   }
 
   /**
@@ -306,23 +379,21 @@ export function useAnalysis({
   function applyPreview(event) {
     const index = event.index
     if (index === undefined || index === null) return
-    const next = { ...previews.value }
-    const current = next[index] || { text: '', suggestions: [], kind: '' }
+    // 按 index 原地写（每次都整表浅拷贝的话，逐字 delta 下就是「每个 token 拷一遍全表」）。
+    const live = previews.value
+    const current = live[index] || { text: '', suggestions: [], kind: '' }
     if (event.type === 'reset') {
       const clearing = event.kind || current.kind
-      next[index] = clearing === 'suggestions'
+      live[index] = clearing === 'suggestions'
         ? { kind: 'suggestions', text: current.text || '', suggestions: [] }
         : { kind: 'interpretation', text: '', suggestions: current.suggestions || [] }
     } else if (event.type === 'delta') {
-      next[index] = { ...current, kind: 'interpretation',
+      live[index] = { ...current, kind: 'interpretation',
         text: (current.text || '') + (event.text || '') }
     } else if (event.type === 'item') {
-      next[index] = { ...current, kind: 'suggestions',
+      live[index] = { ...current, kind: 'suggestions',
         suggestions: [...(current.suggestions || []), event.suggestion] }
-    } else {
-      return
     }
-    previews.value = next
   }
 
   /**
@@ -332,17 +403,16 @@ export function useAnalysis({
    * 另一类还在流的话，kind 顺势让给它。
    */
   function clearPreviews(indexes, kind) {
-    const next = { ...previews.value }
+    const live = previews.value
     for (const raw of indexes) {
       const key = String(raw)
-      const current = next[key]
+      const current = live[key]
       if (!current) continue
       const other = current.kind === kind ? '' : current.kind
-      next[key] = kind === 'interpretation'
+      live[key] = kind === 'interpretation'
         ? { ...current, text: '', kind: other }
         : { ...current, suggestions: [], kind: other }
     }
-    previews.value = next
   }
 
   /**
@@ -358,6 +428,7 @@ export function useAnalysis({
     const what = kind === 'interpretation' ? '潜台词' : '推荐回复'
     if (!single && !silent) augBusy.value = true
     if (!single && !silent) setStatus('AI 正在生成' + what + '，请稍候…')
+    const controller = beginStream()
     let started = []
     try {
       const payload = {}
@@ -380,7 +451,7 @@ export function useAnalysis({
           return
         }
         applyPreview(event)
-      })
+      }, { signal: controller.signal })
       if (!done) throw new ApiError('生成没有正常结束，请重试。', 'app')
       // `done` 只带本次这一类的增量（服务端另有一份加锁合并后落库的权威副本），
       // 前端按同一套「字段是否存在」规则合并：另一类已经生成的内容不会被清掉。
@@ -394,6 +465,8 @@ export function useAnalysis({
       }
       return { ok: true, error: '', failed: done.failed_indexes || [] }
     } catch (err) {
+      // 取消不是失败：不写状态栏，也不给调用方一个「错误」去弹到卡片上。
+      if (isCancelled(err)) return { ok: false, error: '', cancelled: true }
       if (!single && !silent) {
         if (err.kind === 'app') setStatus(err.message, true)
         else {
@@ -410,6 +483,7 @@ export function useAnalysis({
       }
       // 只收自己这一类的预览：并发跑的另一类（右键「一键生成」）可能还在流。
       clearPreviews(started, kind)
+      endStream(controller)
       augBusy.value = false
     }
   }
@@ -439,7 +513,8 @@ export function useAnalysis({
       if (interpretation) calls.push(runInterpretation([target], { silent: true }))
       if (suggestions) calls.push(runSuggestions([target], { silent: true }))
       const outcomes = await Promise.all(calls)
-      const failedCall = outcomes.find((item) => !item.ok)
+      // 被取消的那条不算失败，别在卡片上盖一个「生成失败」的红字。
+      const failedCall = outcomes.find((item) => !item.ok && !item.cancelled)
       const failedIndex = outcomes.some((item) => (item.failed || []).includes(target))
       if (failedCall || failedIndex) {
         setInterpretError(target, failedCall?.error || '这条生成失败，可以再点一次重试。')
@@ -540,12 +615,15 @@ export function useAnalysis({
     }
   }
 
+  // 只导出「外部真的会用到」的：analyzedText / augBusy / isPending 都只在本文件内部使用，
+  // 放进返回值会让人以为外面要读它（曾经就是如此，实际没人用）。
   return {
-    lastData, analyzedText, renderTick, scrollTick, health,
-    statusText, statusErr, notice, busy, augBusy, dirty, analyzed, augDisabled,
-    dockVisible, replyTarget, pendingIndexes, interpretErrors, previews,
+    lastData, renderTick, scrollTick, health,
+    statusText, statusErr, notice, busy, dirty, analyzed, augDisabled,
+    dockVisible, replyTarget, names, pendingIndexes, interpretErrors, previews,
     appendBusy, appendStatus, appendStatusErr,
-    setStatus, setAppendStatus, isPending, analyze, interpretOne, generateFor,
+    setStatus, setAppendStatus, analyze, interpretOne, generateFor,
     runInterpretation, runSuggestions, appendTail, applySession, reset, probe,
+    cancelStreams, exportMarkdown,
   }
-}
+})

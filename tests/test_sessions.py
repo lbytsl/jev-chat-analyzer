@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.exceptions import InvalidRequest, NotFoundError
+from app.core.exceptions import NotFoundError
 from app.repositories.session_store import SessionStore
 from app.services.sessions import SessionService
 
@@ -62,6 +62,39 @@ class TestSessionStore:
         stamps = [item['updated_at'] for item in created]
         assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps)
         assert store.list_meta(10)[0]['id'] == created[-1]['id'], '最后写入的排第一'
+
+    def test_concurrent_writes_keep_updated_at_unique(self, tmp_path):
+        """并发写也要严格唯一：取戳、读旧 created_at、写入必须在一个事务里完成。
+
+        拆成三条连接时（原来是 _next_stamp / get / insert 各开一条），同毫秒的并发写入会
+        算出同一个 updated_at，「按最后活跃倒序」就变成随机序。
+        """
+        import threading
+
+        store = SessionStore(tmp_path / 'db.sqlite')
+        stamps: list[int] = []
+        errors: list[Exception] = []
+        guard = threading.Lock()
+
+        def write(index: int) -> None:
+            try:
+                saved = store.upsert({'title': f'会话{index}', 'relationship': '恋爱'})
+            except Exception as exc:  # noqa: BLE001 - 记下来在断言里报，免得线程里静默吞掉
+                with guard:
+                    errors.append(exc)
+                return
+            with guard:
+                stamps.append(saved['updated_at'])
+
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert not errors, errors
+        assert len(stamps) == 20 and store.count() == 20
+        assert len(set(stamps)) == 20, 'updated_at 撞车会让会话列表的顺序变成随机序'
 
     def test_delete_many(self, tmp_path):
         store = SessionStore(tmp_path / 'db.sqlite')
@@ -135,6 +168,17 @@ class TestSessionService:
             session_service.save_analysis(envelope(texts=(f'她：第{i}条',)), f'她：第{i}条')
         assert len(session_service.list_sessions(limit=2)['sessions']) == 2
         assert session_service.list_sessions(limit=999)['total'] == 3
+
+    def test_write_locks_are_bounded(self):
+        """写锁是固定分片，不随「访问过多少个会话」增长。
+
+        原来是 `dict[str, Lock]` 按会话 id 累积、从不清理——长跑就是慢性内存泄漏。
+        这里顺便把回归钉住：改回字典的话，下面这条 `in` 判断会失败。
+        """
+        size = len(SessionService._LOCKS)
+        for index in range(500):
+            assert SessionService._lock_for(f'session-{index}') in SessionService._LOCKS
+        assert len(SessionService._LOCKS) == size
 
 
 class TestMergeAugmentations:

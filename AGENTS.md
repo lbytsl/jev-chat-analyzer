@@ -27,14 +27,22 @@ cd frontend && pnpm run build                # 构建到 frontend/dist，由后�
 
 ### 测试（离线，假上游，不消耗额度）
 ```bash
-.venv/bin/python -m pytest                                        # 全量离线套件
-.venv/bin/python -m pytest tests/services/test_pipeline.py::test_analyze  # 跑单条测试
+.venv/bin/python -m pytest                                       # 全量离线套件
+.venv/bin/python -m pytest tests/test_pipeline.py::test_analyze   # 跑单条测试
+.venv/bin/python -m pytest --cov                                 # 附覆盖率（门槛见 [tool.coverage]）
+cd frontend && pnpm run check:transcript                         # 说话人识别的前后端一致性用例
+cd frontend && pnpm run test                                     # 前端单测（vitest：composables / utils）
+cd frontend && pnpm run lint                                     # 前端静态检查（0 问题为准）
 ```
 
 ### 静态检查（ruff，dev 依赖）
 ```bash
 .venv/bin/ruff check .          # 或 uv run ruff check .
 ```
+规则集**显式钉在 `pyproject.toml` 的 `[tool.ruff.lint]`**（`E4,E7,E9,F,W,B,I`），当前 **0 条**、
+必须保持全绿：以前结果取决于本机隐式配置，同一份代码在两台机器上报的数字都不一样，没法当门禁。
+想扩规则就先在本地全修完再加进 select（UP / ISC / SIM / FLY 等偏风格的规则暂不纳入：项目刻意
+统一用 `.format()` 而不是 f-string）。
 
 ### 夹具回归 / 回流池（会真实调用模型）
 ```bash
@@ -61,10 +69,10 @@ main.py → api/ → services/ → { domain/, clients/, repositories/ } → core
 - `api/`：接口层，只做协议转换与来源校验（`guards.py`）、依赖注入（`deps.py`）、统一响应（`responses.py`）。`routes/` 下只放端点定义。
 - `services/`：用例层，业务编排（`classifier` 单条分类、`pipeline` 整段 / 追加 / 补跑、`sessions` 落库与合并、`generation` 两条生成链路、`review_pool` 低置信度回流）。
 - `domain/`：纯逻辑、无 IO（`labels` 标签库、`prompts` 全部提示词、`transcript` 聊天解析）。
-- `clients/`：外部依赖（Jev 网关、OpenAI 兼容生成层）。
+- `clients/`：外部依赖（Jev 网关、OpenAI 兼容生成层）。两者的 HTTP 客户端由 `http.py` 统一提供——进程级共享、连接池复用、分项超时，**不要在别处再 `httpx.Client(...)` 新建**（一条消息两次 Jev 调用，50 条就是 100 次握手）。
 - `repositories/`：持久化层，只存取不写业务规则（SQLite 会话库 `var/sessions.db`）。
 - `schemas/`：只描述协议；**校验不放这里**（见下）。
-- `core/`：配置（`config`）、异常（`exceptions`）、日志（`logging`）。
+- `core/`：配置（`config`）、异常（`exceptions`）、日志（`logging`）、共享线程池（`executors`）、重试退避口径（`retry`）。线程池同理：用 `executors.shared_pool()`，不要每请求新建池。
 
 ### 三条刻意约定（改代码前必读）
 1. **提示词集中在 `domain/prompts.py`**：这是产品的真正逻辑，改动等于改判定口径，不应散落在服务代码里。
@@ -98,7 +106,24 @@ main.py → api/ → services/ → { domain/, clients/, repositories/ } → core
 否则用户换了模型根本不知道在说谁。
 
 ### 前端（只展示与编排）
-前端只做展示与状态编排，分类 / 提示词 / 标签库等业务规则全在后端，**不要在 `frontend/` 里补一份实现**。**唯一刻意外置的双份逻辑是说话人识别**：`utils/transcript.js` 与后端 `domain/transcript.py` 必须同步改（两处注释已标注），否则实时 chips 与落库结果会不一致。
+前端只做展示与状态编排，分类 / 提示词 / 标签库等业务规则全在后端，**不要在 `frontend/` 里补一份实现**。**唯一刻意外置的双份逻辑是说话人识别**：`utils/transcript.js` 与后端 `domain/transcript.py` 必须同步改（两处注释已标注），否则实时 chips 与落库结果会不一致。两侧的一致性由 `data/transcript_cases.json` 这组共享用例钉住——后端 `tests/test_transcript_consistency.py`、前端 `pnpm run check:transcript` 各跑一遍同一份用例，只改一侧会有一边红。
+
+改动前端请一并跑 `pnpm run lint`（eslint 扁平配置，**0 问题为准**）与 `pnpm run test`（vitest，
+覆盖 `stores/` 与 `utils/` 的纯逻辑，外加一次整页挂载冒烟）。视觉与交互不做单测，靠
+`pnpm run build` + 手工过一遍页面。
+
+**状态一律放 `src/stores/`（Pinia），组件直连 store**，别再为了「传参数方便」把共享状态塞进 props：
+- 判断新状态放哪，看「谁拥有它」：正文与勾选进 `form`，分析结果进 `analysis`，浮层开关进 `ui`；
+- store 之间互相调用是允许的（`analysis` 会读 `form` / `people` / `sessions`）；
+- **跨 store 的编排**（一次操作要同时改好几个 store，例如打开 / 清空 / 删除会话）统一放
+  `composables/useSessionSwitch.js`，别写回 `App.vue` —— App 现在只剩布局与页面级行为；
+- 展示型叶子组件（`MessageRow` / `AnalysisNote` / `ReplyDock`）继续收 props：它们只负责画，
+  直连 store 反而更难复用；
+- 模态用 `useFocusTrap` 保证键盘焦点不跑到弹窗背后；
+- 改完 store 接线记得跑 `App.smoke.test.js` 那条（它会把整页挂到 jsdom 上，专抓「挂载时才炸」）。
 
 ## 测试约定
-`tests/` 用假上游覆盖领域层 / 服务层 / 仓储层 / 接口契约，**不烧额度**；新增依赖外部模型 / API 的代码时，务必注入假 client 而非真实调用。`app check` 是唯一的真实调用入口（每条消息两次 Jev），改提示词后跑一遍做回归。
+`tests/` 用假上游覆盖领域层 / 服务层 / 仓储层 / 接口契约 / 上游客户端，**不烧额度**；新增依赖外部模型 / API 的代码时，务必注入假 client 而非真实调用（假替身优先**继承**真实服务、只覆盖打上游的那几个方法，接口变了才不会被悄悄绕过）。`app check` 是唯一的真实调用入口（每条消息两次 Jev），改提示词后跑一遍做回归。
+
+这四个检查（后端 ruff、后端 pytest、前端 lint、前端单测）在 `.github/workflows/ci.yml` 里都会跑，
+`.pre-commit-config.yaml` 里挂了最容易被忘掉的 ruff。**改完一处就地跑绿**，别留给 CI。

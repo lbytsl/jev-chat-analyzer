@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import threading
+import zlib
 
 from app.core.config import SESSIONS_LIST_LIMIT, VERSION
 from app.core.exceptions import InvalidRequest, NotFoundError
@@ -20,25 +21,29 @@ DEFAULT_TITLE = '未命名会话'
 PREVIEW_CHARS = 24
 # 会话元数据（由表列负责，payload 里不再存副本）
 SESSION_META_KEYS = ('session_id', 'title', 'transcript', 'created_at', 'updated_at')
+# 会话写锁的分片数：固定常量，与「访问过多少个会话」无关。
+LOCK_SHARDS = 64
 
 
 class SessionService:
-    # 每个会话一把写锁：补跑是「读会话 → 合并 → 写回」，两类生成同时跑（右键「一键生成」
-    # 会并发调两个端点）时，不加锁就会后写覆盖先写，先合并的那类结果凭空消失。
-    _locks: dict[str, threading.Lock] = {}
-    _locks_guard = threading.Lock()
+    # 每个会话一把写锁：整段分析落库、追加消息、补跑生成都是「读会话 → 改 → 写回」，
+    # 两类生成并发时（右键「一键生成」会同时调两个端点），不加锁就会后写覆盖先写，
+    # 先合并的那类结果凭空消失。
+    #
+    # 实现是**固定分片**而不是「一个会话一把锁」的字典：字典会随访问过的会话一直长、
+    # 从不清理，长跑就是慢性内存泄漏；分片数是常量，两三个会话撞到同一片只是多串行一下。
+    # 用 RLock：apply_augmentations 持锁后会再调 update_analysis（同一线程需重入）。
+    _LOCKS = tuple(threading.RLock() for _ in range(LOCK_SHARDS))
 
     def __init__(self, store: SessionStore | None = None):
         self._store = store or SessionStore()
 
     @classmethod
-    def _lock_for(cls, session_id: str) -> threading.Lock:
-        with cls._locks_guard:
-            lock = cls._locks.get(session_id)
-            if lock is None:
-                lock = threading.Lock()
-                cls._locks[session_id] = lock
-            return lock
+    def _lock_for(cls, session_id: str) -> threading.RLock:
+        # 用 crc32 而不是内置 hash()：str 的 hash 每个进程都带随机盐，跨进程不稳定
+        # （虽然只在进程内用，但没必要留这种惊喜）。
+        digest = zlib.crc32(str(session_id).encode('utf-8'))
+        return cls._LOCKS[digest % LOCK_SHARDS]
 
     # ---------- 读 ----------
     def list_sessions(self, limit: int = SESSIONS_LIST_LIMIT) -> dict:
@@ -59,24 +64,32 @@ class SessionService:
         只有「带了 session_id 且库里那条的正文与新正文一模一样」才算原地重跑；
         正文不同（用户换了记录）静默另起一条，绝不覆盖旧会话。
         """
-        target_id = None
-        keep_title = (title or '').strip() or None
-        if session_id:
-            existing = self._store.get(session_id)
+        # 锁挂在「本次要读写的那个 id」上；没带 session_id 时是全新 id，无人竞争。
+        target_id = session_id or new_session_id()
+        with self._lock_for(target_id):
+            keep_title = (title or '').strip() or None
+            existing = self._store.get(target_id) if session_id else None
             if existing is not None and existing.get('transcript') == transcript:
-                target_id = session_id
                 keep_title = keep_title or (existing.get('title') or None)
-        saved = self._store.upsert(self._record(envelope, transcript, target_id, keep_title))
+            elif session_id:
+                # 带了 session_id 但正文不同（或那条已被删）：另起一条，绝不覆盖旧会话。
+                target_id = new_session_id()
+            saved = self._store.upsert(self._record(envelope, transcript, target_id, keep_title))
         return {'session_id': saved['id'], 'updated_at': saved['updated_at'],
                 'created_at': saved['created_at'], 'title': keep_title or self._default_title(envelope)}
 
     def update_analysis(self, session_id: str, envelope: dict, transcript: str | None = None) -> dict:
-        """追加消息 / 补跑生成层 / 单句潜台词后更新已有会话（保留原标题与创建时间）。"""
-        existing = self._store.get(session_id)
-        if existing is None:
-            raise NotFoundError('这个会话不存在，可能已经被删除。')
-        text = transcript if transcript is not None else existing.get('transcript', '')
-        saved = self._store.upsert(self._record(envelope, text, session_id, existing.get('title')))
+        """追加消息 / 补跑生成层 / 单句潜台词后更新已有会话（保留原标题与创建时间）。
+
+        同样加会话锁：与「另一类生成正在合并」并发时，读到的必须是对方写完的版本。
+        RLock 允许 apply_augmentations 持锁后重入到这里。
+        """
+        with self._lock_for(session_id):
+            existing = self._store.get(session_id)
+            if existing is None:
+                raise NotFoundError('这个会话不存在，可能已经被删除。')
+            text = transcript if transcript is not None else existing.get('transcript', '')
+            saved = self._store.upsert(self._record(envelope, text, session_id, existing.get('title')))
         return {'session_id': saved['id'], 'updated_at': saved['updated_at'],
                 'created_at': saved['created_at'], 'title': existing.get('title') or ''}
 

@@ -16,6 +16,7 @@ import urllib.parse
 
 import httpx
 
+from app.clients.http import read_timeout, shared_client
 from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     JevAPIError,
@@ -23,13 +24,18 @@ from app.core.exceptions import (
     JevConnectionError,
 )
 from app.core.logging import get_logger
+from app.core.retry import backoff_delay, parse_retry_after
 
 logger = get_logger('jev')
 
-TIMEOUT_SECONDS = 45.0
+TIMEOUT_SECONDS = 45.0          # 单次读超时上限（模型推理本身就慢）
+# 一次 decide() 的总预算，含重试与退避 sleep。没有它的话最坏是「45s × 4 次 + 退避 ≈ 3 分钟」，
+# 用户那边看不出与卡死的区别；超预算就直接放弃这一条，让上层的失败标记去处理。
+TOTAL_BUDGET_SECONDS = 60.0
 MAX_ATTEMPTS = 4
 RETRYABLE_STATUS = (408, 425, 429)
 DETAIL_LIMIT = 2000
+HTTP_CLIENT_NAME = 'jev'        # 进程级共享客户端（连接池复用），见 clients/http.py
 
 # TypeSafe 上游网关会拒绝 httpx/urllib 的默认请求签名（HTTP 403 / error 1010），
 # 必须伪装成浏览器 UA。这是实测结论，不是随便加的。
@@ -49,10 +55,24 @@ def resolve_endpoint(base_url: str) -> str:
     return base + '/v1/systemone'
 
 
+def sleep_within_budget(delay: float, deadline: float) -> bool:
+    """睡 delay 秒，但不超过剩余预算；预算已经耗尽则返回 False（别再重试了）。
+
+    deadline 用 time.monotonic()（不受系统时钟调整影响）。
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(delay, remaining))
+    return True
+
+
 class JevClient:
-    def __init__(self, settings: Settings | None = None, timeout: float = TIMEOUT_SECONDS):
+    def __init__(self, settings: Settings | None = None, timeout: float = TIMEOUT_SECONDS,
+                 total_budget: float = TOTAL_BUDGET_SECONDS):
         self._settings = settings or get_settings()
         self._timeout = timeout
+        self._total_budget = total_budget
 
     @property
     def endpoint(self) -> str:
@@ -79,37 +99,53 @@ class JevClient:
         return self._post_with_retry(self.endpoint, body, headers)
 
     def _post_with_retry(self, url: str, body: dict, headers: dict) -> dict:
+        """发一次请求并重试，总时长受 `self._total_budget` 限制（含退避 sleep）。
+
+        连接走进程级共享客户端（clients/http.py），不再每次新建——一条消息两次调用、
+        50 条就是 100 次请求，握手开销不该乘 100。
+        """
+        client = shared_client(HTTP_CLIENT_NAME, max_connections=8)
+        deadline = time.monotonic() + self._total_budget
         last_error: Exception | None = None
-        with httpx.Client(timeout=self._timeout) as client:
-            for attempt in range(MAX_ATTEMPTS):
+        for attempt in range(MAX_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning('Jev 请求超出 %ss 预算，停止重试：%s', self._total_budget, url)
+                break
+            # 读超时按剩余预算收窄，避免「预算只剩 2s，却还挂 45s 等一次读」。
+            try:
+                response = client.post(url, json=body, headers=headers,
+                                       timeout=read_timeout(min(self._timeout, remaining)))
+            except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
+                last_error = exc
+                if (attempt < MAX_ATTEMPTS - 1
+                        and not sleep_within_budget(backoff_delay(attempt), deadline)):
+                    break
+                continue
+
+            if response.status_code < 400:
                 try:
-                    response = client.post(url, json=body, headers=headers)
-                except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
-                    last_error = exc
-                    if attempt < MAX_ATTEMPTS - 1:
-                        time.sleep(1.2 * (attempt + 1))
-                    continue
+                    return response.json()
+                except ValueError as exc:
+                    raise JevAPIError(response.status_code, response.text[:DETAIL_LIMIT]) from exc
 
-                if response.status_code < 400:
-                    try:
-                        return response.json()
-                    except ValueError as exc:
-                        raise JevAPIError(response.status_code, response.text[:DETAIL_LIMIT]) from exc
-
-                detail = response.text[:DETAIL_LIMIT]
-                status = response.status_code
-                # 当前 Key 随后的最小请求可以正常成功，说明偶发 403 不一定是永久鉴权失败。
-                # 只额外重试一次；第二次仍为 403 就立即暴露，避免无效地重放整批消息。
-                if status == 403 and attempt == 0:
-                    last_error = JevAPIError(status, detail)
-                    time.sleep(1.5)
-                    continue
-                # 认证和参数错误应立即暴露；限流、超时和服务端抖动可以安全重试。
-                if status not in RETRYABLE_STATUS and not 500 <= status < 600:
-                    raise JevAPIError(status, detail)
+            detail = response.text[:DETAIL_LIMIT]
+            status = response.status_code
+            # 当前 Key 随后的最小请求可以正常成功，说明偶发 403 不一定是永久鉴权失败。
+            # 只额外重试一次；第二次仍为 403 就立即暴露，避免无效地重放整批消息。
+            if status == 403 and attempt == 0:
                 last_error = JevAPIError(status, detail)
-                if attempt < MAX_ATTEMPTS - 1:
-                    time.sleep(self._retry_delay(response, attempt))
+                if not sleep_within_budget(1.5, deadline):
+                    break
+                continue
+            # 认证和参数错误应立即暴露；限流、超时和服务端抖动可以安全重试。
+            if status not in RETRYABLE_STATUS and not 500 <= status < 600:
+                raise JevAPIError(status, detail)
+            logger.warning('Jev 返回 HTTP %s（第 %s 次尝试）', status, attempt + 1)
+            last_error = JevAPIError(status, detail)
+            if (attempt < MAX_ATTEMPTS - 1
+                    and not sleep_within_budget(self._retry_delay(response, attempt), deadline)):
+                break
 
         if isinstance(last_error, JevAPIError):
             raise last_error
@@ -117,9 +153,6 @@ class JevClient:
 
     @staticmethod
     def _retry_delay(response: httpx.Response, attempt: int) -> float:
+        """本次退避时长；退避数学与生成层共用（见 core/retry.py）。"""
         retry_after = response.headers.get('Retry-After') if response.headers else None
-        try:
-            delay = max(1.2 * (attempt + 1), float(retry_after)) if retry_after else 1.2 * (attempt + 1)
-        except (TypeError, ValueError):
-            delay = 1.2 * (attempt + 1)
-        return min(delay, 8)
+        return backoff_delay(attempt, parse_retry_after(retry_after))

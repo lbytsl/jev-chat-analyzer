@@ -12,8 +12,6 @@
 """
 from __future__ import annotations
 
-import traceback
-
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,11 +85,13 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception):
         status, body = describe_error(exc)
-        if status >= 500:
-            logger.error('%s：%s', type(exc).__name__, exc)
         if type(exc) not in KNOWN_ERRORS:
-            # 意料外的异常才打堆栈：业务异常（400/404/502/503）天天见，不必污染日志。
-            traceback.print_exc()
+            # 意外异常打完整堆栈；业务异常（400/404/502/503）天天见，不必污染日志。
+            # 走 logger.exception 而不是 traceback.print_exc()：后者直接写 stderr，
+            # 绕过 logging 的格式/去向/级别配置，同一个错误还会被记两遍。
+            logger.exception('未预期的异常：%s', type(exc).__name__)
+        elif status >= 500:
+            logger.error('%s：%s', type(exc).__name__, exc)
         return error_response(status, body)
 
 

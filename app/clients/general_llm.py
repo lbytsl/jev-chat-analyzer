@@ -20,14 +20,17 @@ from typing import Callable
 
 import httpx
 
+from app.clients.http import read_timeout, shared_client
 from app.core.config import Settings, get_settings
 from app.core.exceptions import GeneralLLMError
+from app.core.retry import backoff_delay
 
 TIMEOUT_SECONDS = 40.0
 MAX_ATTEMPTS = 3
 INITIAL_MAX_TOKENS = 1200
 MAX_TOKENS_CEILING = 4000
 CHAT_PATH = '/chat/completions'
+HTTP_CLIENT_NAME = 'llm'        # 进程级共享客户端（连接池复用），见 clients/http.py
 
 # 重试前先让调用方清掉半截内容（流式才有意义）。
 DeltaCallback = Callable[[str], None]
@@ -163,55 +166,57 @@ class GeneralLLMClient:
         url = self.endpoint
         max_tokens = INITIAL_MAX_TOKENS
         last_error: Exception | None = None
+        # 走进程级共享客户端：连接池复用，不每次新建（见 clients/http.py）。
+        client = shared_client(HTTP_CLIENT_NAME, max_connections=12)
+        timeout = read_timeout(self._timeout)
 
-        with httpx.Client(timeout=self._timeout) as client:
-            for attempt in range(MAX_ATTEMPTS):
-                try:
-                    response = client.post(url, json=self._body(system, user, max_tokens, False),
-                                           headers=self._headers)
-                except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
-                    last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
-                        self.label, url, exc))
-                    if attempt < MAX_ATTEMPTS - 1:
-                        time.sleep(1.5 * (attempt + 1))
-                    continue
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                response = client.post(url, json=self._body(system, user, max_tokens, False),
+                                       headers=self._headers, timeout=timeout)
+            except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
+                last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
+                    self.label, url, exc))
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(backoff_delay(attempt))
+                continue
 
-                if response.status_code >= 400:
-                    error, retryable = self._status_error(
-                        response.status_code, response.text[:1500], url)
-                    if not retryable:
-                        raise error
-                    last_error = error
-                    if attempt < MAX_ATTEMPTS - 1:
-                        time.sleep(1.5 * (attempt + 1))
-                    continue
+            if response.status_code >= 400:
+                error, retryable = self._status_error(
+                    response.status_code, response.text[:1500], url)
+                if not retryable:
+                    raise error
+                last_error = error
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(backoff_delay(attempt))
+                continue
 
-                try:
-                    payload = response.json()
-                except ValueError as exc:
-                    last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
-                        self.label, url, exc))
-                    continue
-                try:
-                    content = payload['choices'][0]['message']['content']
-                    finish = payload['choices'][0].get('finish_reason')
-                except (KeyError, IndexError, TypeError) as exc:
-                    last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
-                        self.label, url, exc))
-                    continue
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
+                    self.label, url, exc))
+                continue
+            try:
+                content = payload['choices'][0]['message']['content']
+                finish = payload['choices'][0].get('finish_reason')
+            except (KeyError, IndexError, TypeError) as exc:
+                last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
+                    self.label, url, exc))
+                continue
 
-                # v008：判定成功的条件改为「拿到可用的 suggestions」即可
-                # （intent_detail 允许为空 = 这句没有潜台词）。
-                parsed = parse_json_content(content)
-                if isinstance(parsed, dict) and (accept is None or accept(parsed)):
-                    return parsed
+            # v008：判定成功的条件改为「拿到可用的 suggestions」即可
+            # （intent_detail 允许为空 = 这句没有潜台词）。
+            parsed = parse_json_content(content)
+            if isinstance(parsed, dict) and (accept is None or accept(parsed)):
+                return parsed
 
-                # 解析失败或被截断：下一轮加大 max_tokens 再试。
-                last_error = self._invalid_answer(content or '', finish)
-                if finish == 'length':
-                    max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
-                elif attempt < MAX_ATTEMPTS - 1:
-                    max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
+            # 解析失败或被截断：下一轮加大 max_tokens 再试。
+            last_error = self._invalid_answer(content or '', finish)
+            if finish == 'length':
+                max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
+            elif attempt < MAX_ATTEMPTS - 1:
+                max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
 
         raise last_error or GeneralLLMError('{} 未能生成有效结果'.format(self.label))
 
@@ -230,53 +235,55 @@ class GeneralLLMClient:
         url = self.endpoint
         max_tokens = INITIAL_MAX_TOKENS
         last_error: Exception | None = None
+        # 与 complete_json 共用同一个共享客户端（连接池复用，见 clients/http.py）。
+        client = shared_client(HTTP_CLIENT_NAME, max_connections=12)
+        timeout = read_timeout(self._timeout)
 
-        with httpx.Client(timeout=self._timeout) as client:
-            for attempt in range(MAX_ATTEMPTS):
-                buffer = ''
-                finish = None
-                try:
-                    with client.stream('POST', url, json=self._body(system, user, max_tokens, True),
-                                       headers=self._headers) as response:
-                        if response.status_code >= 400:
-                            error, retryable = self._status_error(
-                                response.status_code,
-                                response.read().decode('utf-8', 'replace')[:1500], url)
-                            if not retryable:
-                                raise error
-                            last_error = error
-                            if attempt < MAX_ATTEMPTS - 1:
-                                time.sleep(1.5 * (attempt + 1))
+        for attempt in range(MAX_ATTEMPTS):
+            buffer = ''
+            finish = None
+            try:
+                with client.stream('POST', url, json=self._body(system, user, max_tokens, True),
+                                   headers=self._headers, timeout=timeout) as response:
+                    if response.status_code >= 400:
+                        error, retryable = self._status_error(
+                            response.status_code,
+                            response.read().decode('utf-8', 'replace')[:1500], url)
+                        if not retryable:
+                            raise error
+                        last_error = error
+                        if attempt < MAX_ATTEMPTS - 1:
+                            time.sleep(backoff_delay(attempt))
+                        continue
+                    for line in response.iter_lines():
+                        chunk, reason = self._parse_delta_line(line)
+                        if reason:
+                            finish = reason
+                        if chunk is None:
                             continue
-                        for line in response.iter_lines():
-                            chunk, reason = self._parse_delta_line(line)
-                            if reason:
-                                finish = reason
-                            if chunk is None:
-                                continue
-                            buffer += chunk
-                            if on_delta is not None:
-                                on_delta(buffer)
-                except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
-                    last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
-                        self.label, url, exc))
-                    if on_reset is not None:
-                        on_reset()
-                    if attempt < MAX_ATTEMPTS - 1:
-                        time.sleep(1.5 * (attempt + 1))
-                    continue
-
-                parsed = parse_json_content(buffer)
-                if isinstance(parsed, dict) and (accept is None or accept(parsed)):
-                    return parsed
-
-                # 半截 / 被截断：清掉前端那一轮，加大 max_tokens 再来。
-                last_error = self._invalid_answer(buffer, finish)
+                        buffer += chunk
+                        if on_delta is not None:
+                            on_delta(buffer)
+            except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
+                last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
+                    self.label, url, exc))
                 if on_reset is not None:
                     on_reset()
-                if finish == 'length' or not buffer:
-                    max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
-                elif attempt < MAX_ATTEMPTS - 1:
-                    max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
+                if attempt < MAX_ATTEMPTS - 1:
+                    time.sleep(backoff_delay(attempt))
+                continue
+
+            parsed = parse_json_content(buffer)
+            if isinstance(parsed, dict) and (accept is None or accept(parsed)):
+                return parsed
+
+            # 半截 / 被截断：清掉前端那一轮，加大 max_tokens 再来。
+            last_error = self._invalid_answer(buffer, finish)
+            if on_reset is not None:
+                on_reset()
+            if finish == 'length' or not buffer:
+                max_tokens = min(max_tokens * 2, MAX_TOKENS_CEILING)
+            elif attempt < MAX_ATTEMPTS - 1:
+                max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
 
         raise last_error or GeneralLLMError('{} 未能生成有效结果'.format(self.label))

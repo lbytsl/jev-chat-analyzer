@@ -23,16 +23,15 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import ClassifierDep, PipelineDep, SessionDep
 from app.api.guards import guard_json_post
 from app.api.streaming import sse_response
-from app.services.pipeline import PipelineService
-from app.services.sessions import SessionService
 from app.schemas.analysis import (
     AnalysisResult,
     AppendRequest,
@@ -43,6 +42,8 @@ from app.schemas.analysis import (
     TranscriptAnalysisResponse,
 )
 from app.schemas.common import ErrorResponse
+from app.services.pipeline import PipelineService
+from app.services.sessions import SessionService
 
 router = APIRouter(tags=['分析'])
 
@@ -89,26 +90,34 @@ def suggest_chat(payload: GenerationRequest, pipeline: PipelineDep, sessions: Se
 
 
 # ---------- 流式（SSE）版本：同一份实现，边算边推 ----------
+# 三个流式端点都建一个 cancel 事件交出去：`sse_response` 发现客户端断开就置位，
+# 流水线据此停止提交剩下的消息（不然页面都关了，后端还在烧上游额度）。
 @router.post('/analyze-chat/stream', summary='整段分析（流式：每条算完就推）')
-def analyze_chat_stream(payload: TranscriptAnalysisRequest, pipeline: PipelineDep,
+def analyze_chat_stream(payload: TranscriptAnalysisRequest, request: Request, pipeline: PipelineDep,
                         sessions: SessionDep, _: GuardDep) -> StreamingResponse:
-    return sse_response(_stream_analyze(payload, pipeline, sessions))
+    cancel = threading.Event()
+    return sse_response(_stream_analyze(payload, pipeline, sessions, cancel),
+                        request=request, cancel=cancel)
 
 
 @router.post('/interpret-chat/stream', summary='补跑潜台词（流式：逐字推）')
-def interpret_chat_stream(payload: GenerationRequest, pipeline: PipelineDep,
+def interpret_chat_stream(payload: GenerationRequest, request: Request, pipeline: PipelineDep,
                           sessions: SessionDep, _: GuardDep) -> StreamingResponse:
-    return sse_response(_stream_generation(payload, pipeline, sessions, kind='interpretation'))
+    cancel = threading.Event()
+    return sse_response(_stream_generation(payload, pipeline, sessions, kind='interpretation',
+                                           cancel=cancel), request=request, cancel=cancel)
 
 
 @router.post('/suggest-chat/stream', summary='补跑推荐回复（流式：逐条推）')
-def suggest_chat_stream(payload: GenerationRequest, pipeline: PipelineDep,
+def suggest_chat_stream(payload: GenerationRequest, request: Request, pipeline: PipelineDep,
                         sessions: SessionDep, _: GuardDep) -> StreamingResponse:
-    return sse_response(_stream_generation(payload, pipeline, sessions, kind='suggestions'))
+    cancel = threading.Event()
+    return sse_response(_stream_generation(payload, pipeline, sessions, kind='suggestions',
+                                           cancel=cancel), request=request, cancel=cancel)
 
 
 def _stream_analyze(payload: TranscriptAnalysisRequest, pipeline: PipelineService,
-                    sessions: SessionService):
+                    sessions: SessionService, cancel: threading.Event | None = None):
     """整段分析的流式流程：原样转发进度事件，`done` 时落库并把会话元数据带上。
 
     与非流式 `/analyze-chat` 完全同一套实现（`analyze_stream` 是唯一实现），
@@ -116,28 +125,52 @@ def _stream_analyze(payload: TranscriptAnalysisRequest, pipeline: PipelineServic
     """
     data = payload.model_dump()
     transcript = (data.get('transcript') or '').strip()
-    for event in pipeline.analyze_stream(data):
+    for event in pipeline.analyze_stream(data, cancel=cancel):
         if event['type'] == 'done':
+            # 与非流式 `analyze_transcript` 同一条落库规则：同正文原地更新、正文不同另起一条。
             meta = sessions.save_analysis(event['data'], transcript, data.get('session_id'))
             event = {**event, **meta}
         yield event
 
 
-def _stream_generation(payload: GenerationRequest, pipeline: PipelineService,
-                       sessions: SessionService, kind: str):
-    """补跑生成层的流式流程：转发预览事件，`done` 时合并进会话。"""
+def _prepare_augment(payload: GenerationRequest,
+                     sessions: SessionService) -> tuple[dict, str | None]:
+    """补跑类端点的公共准备：带了 session_id 就「以库里的会话为准」，把 prev 补上。
+
+    返回 (请求数据, session_id)。会话不存在时 `sessions.load` 直接抛 404——流式与非流式
+    走的是同一条判定，不会一边 404 一边继续跑。
+    """
     data = payload.model_dump()
     session_id = data.get('session_id')
-    stored = None
-    if session_id:
-        stored = sessions.load(session_id)
-        data['prev'] = stored
+    if not session_id:
+        # 老路径（脚本 / 夹具）：只带 prev，不落库。
+        return data, None
+    data['prev'] = sessions.load(session_id)
+    return data, session_id
+
+
+def _persist_augment(sessions: SessionService, session_id: str | None, augmentations: dict,
+                     kind: str) -> dict:
+    """把本次这一类产物合并回会话，返回要附在 `done` / 响应上的字段。
+
+    读-合并-写回交给会话层加锁完成：两类生成并发时不会互相覆盖。
+    """
+    if not session_id:
+        return {}
+    sessions.apply_augmentations(session_id, augmentations, kind)
+    return {'session_id': session_id}
+
+
+def _stream_generation(payload: GenerationRequest, pipeline: PipelineService,
+                       sessions: SessionService, kind: str,
+                       cancel: threading.Event | None = None):
+    """补跑生成层的流式流程：转发预览事件，`done` 时合并进会话。"""
+    data, session_id = _prepare_augment(payload, sessions)
     runner = pipeline.interpret_stream if kind == 'interpretation' else pipeline.suggest_stream
-    for event in runner(data):
-        if event['type'] == 'done' and session_id and stored is not None:
-            # 读-合并-写回交给会话层加锁完成：两类生成并发时不会互相覆盖。
-            sessions.apply_augmentations(session_id, event.get('augmentations') or {}, kind)
-            event = {**event, 'session_id': session_id}
+    for event in runner(data, cancel=cancel):
+        if event['type'] == 'done':
+            event = {**event, **_persist_augment(sessions, session_id,
+                                                 event.get('augmentations') or {}, kind)}
         yield event
 
 
@@ -148,20 +181,14 @@ def _run_generation(payload: GenerationRequest, pipeline: PipelineService,
     响应只包含**本次这一类**的产物（`augmentations`），不再回带整份会话：
     回带会话会让「推荐回复」的返回里出现存量的潜台词字段，看起来像这个端点也生成了潜台词。
     会话合并仍由服务端完成（加锁的读-改-写），前端按同一套「字段是否存在」规则合并本次增量。
+
+    与流式版共用 `_prepare_augment` / `_persist_augment`：准备与落库的规则只写一遍。
     """
-    data = payload.model_dump()
-    session_id = data.get('session_id')
-    stored = None
-    if session_id:
-        stored = sessions.load(session_id)
-        data['prev'] = stored
+    data, session_id = _prepare_augment(payload, sessions)
     runner = pipeline.interpret if kind == 'interpretation' else pipeline.suggest
     response = runner(data)
-    if session_id and stored is not None:
-        # 读-合并-写回交给会话层加锁完成：两类生成并发时不会互相覆盖。
-        sessions.apply_augmentations(session_id, response.get('augmentations') or {}, kind)
-        response = {**response, 'session_id': session_id}
-    return response
+    return {**response, **_persist_augment(sessions, session_id,
+                                           response.get('augmentations') or {}, kind)}
 
 
 @router.post('/append-chat', responses={**_ERRORS, 200: {'model': TranscriptAnalysisResponse}},

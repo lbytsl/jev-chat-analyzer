@@ -11,7 +11,11 @@ import pytest
 
 from app.domain.labels import get_label_library
 from app.repositories.session_store import SessionStore
-from app.services.generation import InterpretationContent, SuggestionsContent
+from app.services.generation import (
+    GenerationService,
+    InterpretationContent,
+    SuggestionsContent,
+)
 from app.services.pipeline import PipelineService
 from app.services.review_pool import ReviewPool
 from app.services.sessions import SessionService
@@ -85,14 +89,19 @@ class FakeJev:
         return {'model': self.model, 'answers': answers, 'usage': {'input_tokens': 10, 'output_tokens': 2}}
 
 
-class FakeGeneration:
-    """生成层替身：潜台词与推荐回复是两个方法（与真实实现一致）。
+class FakeGeneration(GenerationService):
+    """生成层替身：只覆盖两个真正打上游的 `generate_*`，其余照真实实现走。
+
+    **继承**（而不是鸭子类型的独立类）是有意的：真实服务上还挂着 `run_interpretation` /
+    `run_suggestions` 这类「不抛」入口，替身一旦漏实现，测试就会在 `AttributeError` 里
+    绕圈（曾经就是这样），而继承能保证接口变了一处都不用改。
 
     `fail_interpretation` / `fail_suggestions` 可以分别制造失败，用来验证两边互不牵连。
     """
 
     def __init__(self, fail: bool = False, fail_interpretation: bool | None = None,
                  fail_suggestions: bool | None = None, detail: str = '嘴上嫌弃实际在撒娇'):
+        # 不调 super().__init__()：它会建真实客户端（虽然不发请求），这里用不上。
         self.fail_interpretation = fail if fail_interpretation is None else fail_interpretation
         self.fail_suggestions = fail if fail_suggestions is None else fail_suggestions
         self.detail = detail

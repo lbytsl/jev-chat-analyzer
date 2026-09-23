@@ -1,11 +1,14 @@
-"""流水线测试：解读对象圈定、复用旧结果、生成层开关、回流池落盘。全部用假上游。"""
+"""流水线测试：解读对象圈定、复用旧结果、生成层开关、回流池落盘、断连取消。全部用假上游。"""
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
+from app.core.config import get_settings
 from app.core.exceptions import InvalidRequest, JevConnectionError
+from app.core.executors import shared_pool
 from app.services.pipeline import PipelineService
 from app.services.review_pool import ReviewPool
 from tests.conftest import FakeClassifier, FakeGeneration
@@ -18,6 +21,43 @@ def build(tmp_path, classifier=None, generation=None, **kwargs):
     pool = ReviewPool(path=tmp_path / 'pool.json')
     service = PipelineService(classifier=classifier, generation=generation or FakeGeneration(), pool=pool)
     return service, classifier, pool
+
+
+class CancellingClassifier(FakeClassifier):
+    """第一次分类就把 cancel 置位，模拟「客户端在分析刚开始时断开」。
+
+    刻意在 classify **入口**置位（而不是分类完之后）：这样「第一条 message 事件到达时
+    cancel 必然已置位」，测试不依赖线程调度顺序。
+    """
+
+    def __init__(self, cancel, **kwargs):
+        super().__init__(**kwargs)
+        self._cancel = cancel
+
+    def classify(self, state, **kwargs):
+        self._cancel.set()
+        return super().classify(state, **kwargs)
+
+
+class CancellingGeneration(FakeGeneration):
+    """同上，作用在生成层。"""
+
+    def __init__(self, cancel, **kwargs):
+        super().__init__(**kwargs)
+        self._cancel = cancel
+
+    def generate_interpretation(self, *args, **kwargs):
+        self._cancel.set()
+        return super().generate_interpretation(*args, **kwargs)
+
+
+def wait_for_jev_pool() -> None:
+    """等共享池把「已经提交」的任务跑完，再数调用次数。
+
+    取消是协作式的：已进池的那几条会跑完（不强杀线程），只是不再提交新的。
+    """
+    workers = get_settings().jev_max_workers
+    shared_pool('jev', workers).submit(lambda: None).result(timeout=5)
 
 
 class TestAnalyze:
@@ -107,6 +147,71 @@ class TestAnalyze:
         transcript = '\n'.join('她：消息{}'.format(i) for i in range(51))
         with pytest.raises(InvalidRequest, match='最多分析'):
             service.analyze({'transcript': transcript, 'relationship': '恋爱'})
+
+
+class TestCancellation:
+    """客户端断开后不再把剩下的消息跑完：每条 2 次 Jev 调用，那是真金白银。"""
+
+    def test_cancel_stops_submitting_the_rest(self, tmp_path):
+        cancel = threading.Event()
+        service, classifier, _ = build(tmp_path, classifier=CancellingClassifier(cancel))
+        transcript = '\n'.join(f'她：第{i}条' for i in range(12))
+
+        events = list(service.analyze_stream({'transcript': transcript, 'relationship': '恋爱'},
+                                            cancel=cancel))
+        wait_for_jev_pool()
+
+        # 只跑满了第一轮窗口：12 条里剩下的 8 条压根没进池。
+        workers = get_settings().jev_max_workers
+        assert workers < 12, '这个用例需要「窗口小于消息数」，别把并发度调到 12 以上'
+        assert len(classifier.calls) == workers
+        assert not any(event['type'] == 'done' for event in events), '取消不发 done，路由据此不落库'
+
+    def test_without_cancel_the_whole_batch_runs(self, tmp_path):
+        """不传 cancel（脚本 / 夹具走的非流式路径）行为不变。"""
+        service, _, _ = build(tmp_path)
+        events = list(service.analyze_stream({'transcript': TRANSCRIPT, 'relationship': '恋爱'}))
+        assert any(event['type'] == 'done' for event in events)
+
+    def test_cancel_skips_the_done_event_for_generation(self, tmp_path):
+        """补跑生成被取消时也不发 done：路由就不会去合并一个半截结果。"""
+        cancel = threading.Event()
+        service, _, _ = build(tmp_path)
+        analyzed = service.analyze({'transcript': TRANSCRIPT, 'relationship': '恋爱',
+                                    'read_labels': ['我', '她']})
+        service._generation = CancellingGeneration(cancel)
+
+        events = list(service.interpret_stream({'prev': analyzed}, cancel=cancel))
+        assert not any(event['type'] == 'done' for event in events)
+
+
+class TestStreamingFailureAccounting:
+    """流式路径里「补跑后仍失败」的那几条要如实计数，不能让整条流崩掉。
+
+    回归用例：`analyze_stream` 曾经把失败事件的 `index`（int）直接交给 `_envelope`，
+    而 `_envelope` 是按 `item['index']` 取的。只要「一部分成功、一部分两轮都失败」，
+    收尾就会 TypeError —— 前端看到的是「分析没有正常结束，请重试」，而且不会落库。
+    整批全失败反而正常（那条路径会先抛连接错误）。
+    """
+
+    def test_partial_failure_still_emits_done(self, tmp_path, monkeypatch):
+        # 补跑之间会 sleep(2)；测试里换成空操作。
+        monkeypatch.setattr('app.services.pipeline.time.sleep', lambda *_: None)
+        transcript = '\n'.join(f'她：第{i}条' for i in range(4))
+        # 前 5 次调用失败：第一轮 4 条全断连，补跑那一轮里再挂 1 条。
+        service, classifier, _ = build(tmp_path, classifier=FakeClassifier(fail_times=5))
+
+        events = list(service.analyze_stream({'transcript': transcript, 'relationship': '恋爱'}))
+
+        done = [event for event in events if event['type'] == 'done']
+        assert len(done) == 1, '部分失败不该让整条流没有收尾'
+        data = done[0]['data']
+        assert data['count'] == 3 and data['failed_count'] == 1
+        assert len(data['failed_indexes']) == 1
+        assert isinstance(data['failed_indexes'][0], int), 'failed_indexes 是序号列表'
+        assert data['failed_indexes'][0] in [item['index'] for item in data['messages']]
+        # 两轮各 4 条；失败的那条正好是全局最后一条时，才会再为 reply_target 补一次。
+        assert len(classifier.calls) in (8, 9)
 
 
 class TestAppend:

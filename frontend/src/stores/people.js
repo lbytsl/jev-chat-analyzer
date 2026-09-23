@@ -1,16 +1,23 @@
+import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
+import { useFormStore } from '@/stores/form'
 import { detectPeople, guessMe } from '@/utils/transcript'
 
 /**
  * 「我是谁 / 解读谁」的自动推断。
  *
- * 规则与旧单文件版逐行等价，关键点有三个：
+ * 规则与旧版逐行等价，关键点有三个：
  * 1) 只在说话人集合发生变化（label+count 变化）时才重算，否则用户的选择不会被打断；
  * 2) 用户手动改过（userTouched）后，优先保留他的选择，只剔除这次记录里已经没有的人；
  * 3) 只剩一个说话人时补勾上、避免「按钮禁用但页面上没有可点的东西」这种死路。
+ *
+ * 正文直接取自 form store（原来是 App 通过参数喂进来的 ref）：这样它不必等别人注入
+ * 状态，也不会有「App 传了旧 ref」这类错配。
  */
-export function usePeople(transcript) {
+export const usePeopleStore = defineStore('people', () => {
+  const form = useFormStore()
+
   const people = ref([])
   const me = ref(null)
   const read = ref(new Set())
@@ -18,7 +25,7 @@ export function usePeople(transcript) {
   let lastKey = ''
 
   function sync() {
-    const detected = detectPeople(transcript.value)
+    const detected = detectPeople(form.transcript)
     people.value = detected
     const key = detected.map((p) => p.label + ':' + p.count).join('|')
     if (key === lastKey) return
@@ -86,12 +93,35 @@ export function usePeople(transcript) {
     read.value = next
   }
 
-  watch(transcript, sync)
+  // 输入时防抖：detectPeople 会把整段文本逐行跑正则（输入框允许 5 万字），每个输入事件
+  // 都全量扫一遍会明显卡顿。`sync()` 本身仍可直接调——切会话的 restore 与提交前的 flush
+  // 都走它，防抖只作用于「一边打字一边重算」这条路径。
+  const SYNC_DEBOUNCE_MS = 250
+  let syncTimer = null
+  let disposed = false
+
+  watch(() => form.transcript, () => {
+    // store 是长生命周期的，dispose() 之后不该再自己被唤醒（测试里尤其明显）。
+    if (disposed) return
+    if (syncTimer) clearTimeout(syncTimer)
+    syncTimer = setTimeout(() => {
+      syncTimer = null
+      sync()
+    }, SYNC_DEBOUNCE_MS)
+  })
   sync()
 
+  /** 清掉待触发的防抖定时器（组件卸载时调用）。 */
+  function dispose() {
+    disposed = true
+    if (syncTimer) {
+      clearTimeout(syncTimer)
+      syncTimer = null
+    }
+  }
+
   const targets = computed(() => people.value.filter((p) => read.value.has(p.label)))
-  const totalTargets = computed(() => targets.value.reduce((sum, p) => sum + p.count, 0))
   const solo = computed(() => people.value.length < 2)
 
-  return { people, me, read, targets, totalTargets, solo, setMe, toggleRead, restore, sync }
-}
+  return { people, me, read, targets, solo, setMe, toggleRead, restore, sync, dispose }
+})

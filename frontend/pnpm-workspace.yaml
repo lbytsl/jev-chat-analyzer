@@ -5,3 +5,20 @@
 # 于是构建被连带卡住 —— 表现是「安装看着成功、构建却报 pnpm install 失败」。
 allowBuilds:
   esbuild: true
+
+# 本机全局 pnpm 为 12.5.1，而 package.json 里 pin 了 pnpm@11.21.0。默认情况下 pnpm
+# 会尝试引导安装 11.21.0，并在 Windows 上因符号链接报 os error 448（ERROR_UNTRUSTED_MOUNT_POINT，
+# 不受信任的装入点），表现为 ERR_PNPM_PACKAGE_MANAGER_INSPECT_OPTIONAL_DEPENDENCY。
+# ignore = 直接跳过版本检查，使用本机已安装的 pnpm（不下载 pin 的版本）。
+# 注意：pnpm 12 起 managePackageManagerVersions 已被移除，由 pmOnFail 取代；
+# 旧的 .npmrc 写法（manage-package-manager-versions）也不再被读取。
+pmOnFail: ignore
+
+# 有些 Windows 环境不允许遍历 pnpm 为依赖建的符号链接/联接：读 node_modules/vite
+# （symlink → .pnpm/…）会直接失败，报 os error 448（ERROR_UNTRUSTED_MOUNT_POINT，
+# 「无法遍历该路径，因为它包含不受信任的装入点」）。默认的 isolated 布局因此
+# 「装得下、用不了」——install 看着成功，构建与 dev 却报 MODULE_NOT_FOUND。
+# hoisted = 扁平 node_modules、真实目录、不建任何链接（等同 npm 的经典布局）。
+# 代价：不再只有「显式声明的依赖」才可见（理论上可能出现幽灵依赖），node_modules 也会变大；
+# 对本项目（只有 vite + vue 两个依赖）没有实际影响。
+nodeLinker: hoisted

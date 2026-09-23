@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 
 import { copyText } from '@/utils/clipboard'
 
@@ -50,11 +50,23 @@ function onInput() {
   emit('update:text', (textEl.value?.textContent || '').trim())
 }
 
+// 「已复制」的复位定时器要留句柄：面板会随 renderTick 反复重建，留着野定时器会在
+// 组件已经卸载之后再去改状态。
+let copiedTimer = null
+
 async function onCopy() {
   const ok = await copyText((textEl.value?.textContent || '').trim())
   copied.value = ok
-  setTimeout(() => { copied.value = false }, 1500)
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copiedTimer = null
+    copied.value = false
+  }, 1500)
 }
+
+onUnmounted(() => {
+  if (copiedTimer) clearTimeout(copiedTimer)
+})
 
 watch(() => [props.item, suggestions.value.length], syncText, { immediate: true })
 </script>

@@ -26,4 +26,11 @@ export default defineConfig({
     emptyOutDir: true,
     chunkSizeWarningLimit: 900,
   },
+  // 单测（`pnpm run test`）：只覆盖不依赖渲染器的纯逻辑层（composables / utils）。
+  // 组件渲染仍靠 `pnpm run build` + 手工过一遍页面——成本更低也更接近真实用法。
+  // environment 用 jsdom：`api/client.js` 在模块顶层读 location，node 环境下会直接炸。
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.js'],
+  },
 })

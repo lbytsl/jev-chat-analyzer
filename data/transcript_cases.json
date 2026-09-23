@@ -1,0 +1,100 @@
+{
+  "_comment": [
+    "说话人识别的「前后端一致性」用例。前端 frontend/src/utils/transcript.js 与后端",
+    "app/domain/transcript.py 是刻意保留的双份实现，靠这份用例兜底：",
+    "  后端：tests/test_transcript_consistency.py",
+    "  前端：pnpm run check:transcript（frontend/scripts/check-transcript.mjs）",
+    "两侧各跑一遍同一份文件，任何一侧改了规则而没同步，都会在另一边红掉。",
+    "labels = 说话人标签按首次出现顺序；me_label = 默认的「我是谁」（没有说话人时为 null）。",
+    "不在运行时被应用读取，纯测试夹具。",
+    "注意：后端 parse_transcript 的 speakers 可能保留一个「有标签但没有正文」的候选",
+    "（例如整段只有一个未识别的名字），这类输入最终会被 _select_targets 拒掉（400），",
+    "不属于两边需要一致的范畴，因此没有收进用例。"
+  ],
+  "cases": [
+    {
+      "name": "tag_form_basic",
+      "transcript": "我：今晚一起吃饭吗？\n她：好啊\n我：那七点见\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "tag_form_colon_variants",
+      "transcript": "我: 在吗\n她：在的\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "wechat_form",
+      "transcript": "林潇\n2026年09月20日 15:51\n在吗\n\n陈岑\n2026年09月20日 15:52\n在的\n",
+      "labels": ["林潇", "陈岑"],
+      "me_label": "林潇"
+    },
+    {
+      "name": "markdown_heading_then_time",
+      "transcript": "# 聊天记录\n09:30\n\n我：在吗\n她：在\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "mixed_form",
+      "transcript": "我：晚上有空吗\n她\n09:31\n有空\n我：那去看电影？\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "only_other_pronouns",
+      "transcript": "她：在吗\n对方：在的\n",
+      "labels": ["她", "对方"],
+      "me_label": null
+    },
+    {
+      "name": "single_me",
+      "transcript": "我：在吗\n我：在的话回我一下\n",
+      "labels": ["我"],
+      "me_label": "我"
+    },
+    {
+      "name": "single_other",
+      "transcript": "她：在吗\n她：在的话回我\n",
+      "labels": ["她"],
+      "me_label": null
+    },
+    {
+      "name": "english_name_with_dot",
+      "transcript": "Mr.Wang\n2026-09-20 10:00\nhello\n\n小美\n2026-09-20 10:01\nhi\n",
+      "labels": ["Mr.Wang", "小美"],
+      "me_label": "Mr.Wang"
+    },
+    {
+      "name": "three_people",
+      "transcript": "我：A\n她：B\n老王：C\n",
+      "labels": ["我", "她", "老王"],
+      "me_label": "我"
+    },
+    {
+      "name": "multiline_body_is_not_speaker",
+      "transcript": "我：今天\n好累\n她：早点睡\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "time_formats_variants",
+      "transcript": "我\n昨天 15:51\n在吗\n她\n上午 9:05\n在\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "crlf_line_endings",
+      "transcript": "我：在吗\r\n她：在的\r\n",
+      "labels": ["我", "她"],
+      "me_label": "我"
+    },
+    {
+      "name": "no_speaker_marks",
+      "transcript": "今天天气不错\n明天也是\n",
+      "labels": [],
+      "me_label": null
+    }
+  ]
+}

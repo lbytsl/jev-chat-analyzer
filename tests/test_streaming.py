@@ -143,7 +143,7 @@ class TestSuggestionPreviews:
         good = FakeStreamResponse(lines=sse_lines(
             '{"suggestions": [{"label": "甲", "text": "完整的第一句"}]}'))
         fake = FakeClient([truncated, good])
-        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        use_fake_client(monkeypatch, fake)
 
         service = GenerationService(
             client=general_llm.GeneralLLMClient(settings=settings(gen_suggestions_count=5)))
@@ -177,13 +177,17 @@ class FakeStreamResponse:
 
 
 class FakeClient:
-    """替掉 httpx.Client：按轮次依次返回预设响应，并记录每轮请求体。"""
+    """替掉共享客户端（clients/http.py）：按轮次依次返回预设响应，并记录每轮请求体。"""
 
     def __init__(self, rounds):
         self._rounds = list(rounds)
         self.bodies = []
 
-    def stream(self, method, url, json=None, headers=None):  # noqa: A002 - 与 httpx 签名对齐
+    def stream(self, method, url, json=None, headers=None, timeout=None):  # noqa: A002
+        self.bodies.append(json)
+        return self._rounds.pop(0)
+
+    def post(self, url, json=None, headers=None, timeout=None):
         self.bodies.append(json)
         return self._rounds.pop(0)
 
@@ -192,6 +196,15 @@ class FakeClient:
 
     def __exit__(self, *args):
         return False
+
+
+def use_fake_client(monkeypatch, fake):
+    """把生成层的 HTTP 客户端换成桩。
+
+    客户端现在是 `clients/http.py` 里的进程级共享单例，桩要打在 `shared_client` 上：
+    原来打 `httpx.Client` 那个缝已经不通了（共享客户端只在自己模块里建一次实例）。
+    """
+    monkeypatch.setattr(general_llm, 'shared_client', lambda name, **_: fake)
 
 
 def sse_lines(*chunks: str) -> list[str]:
@@ -208,7 +221,7 @@ def settings(**overrides):
 class TestStreamJson:
     def test_deltas_are_forwarded_and_result_parsed(self, monkeypatch):
         fake = FakeClient([FakeStreamResponse(lines=sse_lines('{"intent_detail": "', '在撒娇', '"}'))])
-        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        use_fake_client(monkeypatch, fake)
         seen = []
         client = general_llm.GeneralLLMClient(settings=settings())
         parsed = client.stream_json('sys', 'user', accept=lambda p: 'intent_detail' in p,
@@ -224,7 +237,7 @@ class TestStreamJson:
                                                  'finish_reason': 'length'}]})])
         good = FakeStreamResponse(lines=sse_lines('{"intent_detail": "完整的"}'))
         fake = FakeClient([truncated, good])
-        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        use_fake_client(monkeypatch, fake)
         resets = []
         client = general_llm.GeneralLLMClient(settings=settings())
         parsed = client.stream_json('sys', 'user', accept=lambda p: 'intent_detail' in p,
@@ -235,7 +248,7 @@ class TestStreamJson:
 
     def test_auth_failure_is_not_retried(self, monkeypatch):
         fake = FakeClient([FakeStreamResponse(status_code=401, text='bad key')])
-        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        use_fake_client(monkeypatch, fake)
         client = general_llm.GeneralLLMClient(settings=settings())
         with pytest.raises(GeneralLLMError, match='鉴权失败'):
             client.stream_json('sys', 'user')
@@ -259,7 +272,7 @@ class TestClientEndpointAndErrors:
 
     def test_http_404_names_the_model_and_the_requested_url(self, monkeypatch):
         fake = FakeClient([FakeStreamResponse(status_code=404, text='{"error": "not found"}')])
-        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        use_fake_client(monkeypatch, fake)
         client = general_llm.GeneralLLMClient(settings=settings(
             deepseek_model='step-5-preview', deepseek_base_url='https://api.stepfun.com/v1'))
         with pytest.raises(GeneralLLMError) as info:
@@ -281,9 +294,9 @@ class TestClientEndpointAndErrors:
 # ---------- 流水线事件 ----------
 class TestPipelineStreams:
     def test_interpret_stream_emits_preview_then_done(self, tmp_path):
-        from tests.conftest import FakeClassifier, FakeGeneration
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪'),
                                   generation=FakeGeneration(),
@@ -304,9 +317,9 @@ class TestPipelineStreams:
         assert done['failed_indexes'] == []
 
     def test_suggest_stream_emits_items(self, tmp_path):
-        from tests.conftest import FakeClassifier, FakeGeneration
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪'),
                                   generation=FakeGeneration(),
@@ -318,9 +331,9 @@ class TestPipelineStreams:
         assert list(events[-1]['augmentations']) == [str(analyzed['messages'][-1]['index'])]
 
     def test_analyze_stream_reports_each_message(self, tmp_path):
-        from tests.conftest import FakeClassifier, FakeGeneration
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪'),
                                   generation=FakeGeneration(),
@@ -335,10 +348,10 @@ class TestPipelineStreams:
         assert done['type'] == 'done' and done['data']['count'] == 3
 
     def test_analyze_stream_marks_retry_then_recovers(self, tmp_path):
-        from tests.conftest import FakeClassifier, FakeGeneration
+        import app.services.pipeline as pipeline_module
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
-        import app.services.pipeline as pipeline_module
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪',
                                                             fail_times=1),
@@ -362,9 +375,9 @@ class TestPipelineStreams:
         既没有 done 事件、也不会落库，看起来就像「解析完什么都没保存」。
         """
         from app.core.exceptions import JevAPIError
-        from tests.conftest import FakeClassifier, FakeGeneration
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(error=JevAPIError(401, 'unauthorized')),
                                   generation=FakeGeneration(),
@@ -373,11 +386,11 @@ class TestPipelineStreams:
             list(service.analyze_stream({'transcript': TRANSCRIPT, 'relationship': '恋爱'}))
 
     def test_analyze_stream_raises_when_everything_fails(self, tmp_path):
+        import app.services.pipeline as pipeline_module
         from app.core.exceptions import JevConnectionError
-        from tests.conftest import FakeClassifier, FakeGeneration
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
-        import app.services.pipeline as pipeline_module
+        from tests.conftest import FakeClassifier, FakeGeneration
 
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪',
                                                             fail_times=99),

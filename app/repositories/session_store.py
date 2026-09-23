@@ -17,6 +17,7 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.core.config import SESSIONS_DB, SESSIONS_LIST_LIMIT
@@ -61,13 +62,33 @@ class SessionStore:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
-        # 每次调用各自开连接：写操作发生在请求线程，分类并发用的是另一批线程，
-        # 不共享连接就没有跨线程问题；WAL 让读写不互相阻塞。
-        conn = sqlite3.connect(self.path, timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA journal_mode=WAL')
-        return conn
+    @contextmanager
+    def _connect(self):
+        """一次操作 = 一条连接；退出时一定提交/回滚并**关闭**。
+
+        每次调用各自开连接：写操作发生在请求线程，分类并发用的是另一批线程，
+        不共享连接就没有跨线程问题；WAL 让读写不互相阻塞。
+
+        两个容易踩的点：
+        1) `with sqlite3.connect(...) as conn:` 只提交事务、**不关闭**连接（靠引用计数回收
+           在 CPython 下能用，但连接与文件句柄会累积），所以这里显式 close；
+        2) `isolation_level=None` —— 事务交给调用方用 `BEGIN IMMEDIATE` 显式开。默认的隐式
+           事务是在第一条 DML 之前才开的，`upsert` 里「读时间戳 → 读 created_at → 写入」
+           中间就会留出竞态窗口。
+        """
+        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA journal_mode=WAL')
+            yield conn
+            if conn.in_transaction:
+                conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # ---------- 读 ----------
     def count(self) -> int:
@@ -97,42 +118,35 @@ class SessionStore:
         return record
 
     # ---------- 写 ----------
-    def _next_stamp(self) -> int:
+    def _next_stamp(self, conn) -> int:
         """严格递增的 updated_at：同一毫秒内的连续写入也要能排出先后。
 
         毫秒时间戳会撞车（一次请求里连写几条、测试里连着建几个会话），撞车后
         「按最后活跃倒序」就成了随机序；所以取 max(当前时间, 库里最大值 + 1)。
+        必须在写事务里算（见 upsert）：换一条连接读就是「读一次再算」的竞态。
         """
-        return max(now_ms(), self._latest_stamp() + 1)
+        return max(now_ms(), self._latest_stamp(conn) + 1)
 
-    def _latest_stamp(self) -> int:
-        with self._connect() as conn:
-            row = conn.execute('SELECT MAX(updated_at) FROM sessions').fetchone()
+    @staticmethod
+    def _latest_stamp(conn) -> int:
+        row = conn.execute('SELECT MAX(updated_at) FROM sessions').fetchone()
         return int(row[0] or 0)
 
     def upsert(self, record: dict) -> dict:
-        """按 id 覆盖写入（不存在则新建）；created_at 只在新建时落定。"""
+        """按 id 覆盖写入（不存在则新建）；created_at 只在新建时落定。
+
+        「取时间戳 → 读旧 created_at → 写入」三步合在**一个事务**里（BEGIN IMMEDIATE）。
+        拆成三条连接时：一次保存要开 3-4 条连接，而且同一毫秒内的并发写入会算出同一个
+        updated_at，「按最后活跃倒序」就变成随机序；BEGIN IMMEDIATE 立刻拿到写锁，
+        避免读到别的连接还没提交的状态。
+        """
         session_id = record.get('id') or new_session_id()
-        stamp = self._next_stamp()
-        existing = self.get(session_id)
-        created_at = existing['created_at'] if existing else stamp
-        values = (
-            session_id,
-            (record.get('title') or '').strip(),
-            record.get('relationship') or '',
-            record.get('transcript') or '',
-            record.get('preview') or '',
-            int(record.get('message_count') or 0),
-            int(record.get('count_other') or 0),
-            int(record.get('count_me') or 0),
-            int(record.get('failed_count') or 0),
-            1 if record.get('gen_interpretation') else 0,
-            1 if record.get('gen_suggestions') else 0,
-            json.dumps(record.get('payload') or {}, ensure_ascii=False),
-            created_at,
-            stamp,
-        )
         with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            stamp = self._next_stamp(conn)
+            row = conn.execute('SELECT created_at FROM sessions WHERE id = ?',
+                               (session_id,)).fetchone()
+            created_at = int(row['created_at']) if row is not None else stamp
             conn.execute(
                 'INSERT INTO sessions (id, title, relationship, transcript, preview, message_count,'
                 ' count_other, count_me, failed_count, gen_interpretation, gen_suggestions,'
@@ -146,7 +160,22 @@ class SessionStore:
                 ' gen_interpretation=excluded.gen_interpretation,'
                 ' gen_suggestions=excluded.gen_suggestions, payload=excluded.payload,'
                 ' updated_at=excluded.updated_at',
-                values,
+                (
+                    session_id,
+                    (record.get('title') or '').strip(),
+                    record.get('relationship') or '',
+                    record.get('transcript') or '',
+                    record.get('preview') or '',
+                    int(record.get('message_count') or 0),
+                    int(record.get('count_other') or 0),
+                    int(record.get('count_me') or 0),
+                    int(record.get('failed_count') or 0),
+                    1 if record.get('gen_interpretation') else 0,
+                    1 if record.get('gen_suggestions') else 0,
+                    json.dumps(record.get('payload') or {}, ensure_ascii=False),
+                    created_at,
+                    stamp,
+                ),
             )
         return {'id': session_id, 'created_at': created_at, 'updated_at': stamp}
 

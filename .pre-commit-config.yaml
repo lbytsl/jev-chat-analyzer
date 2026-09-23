@@ -1,0 +1,25 @@
+# 提交前把「一定会被 CI 拦下」的东西先拦在本地。
+#
+# 装一次即可：uv tool install pre-commit && pre-commit install
+#
+# 刻意**没有**放 end-of-file-fixer / trailing-whitespace：这个仓库（尤其 Windows 上的
+# 检出）换行与行尾空白现状复杂，第一次运行会重写大量文件、把 diff 冲掉。要做就把它们
+# 当成一次独立的格式化提交来做。
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # 与 pyproject.toml 里 dev 组的 ruff 版本保持一致（规则集也在那边钉死）。
+    rev: v0.16.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: detect-private-key          # .env 里是真 key，绝不能进仓库
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: mixed-line-ending
+        args: [--fix=no]                # 只报不改：避免把 CRLF 检出的仓库整体改写

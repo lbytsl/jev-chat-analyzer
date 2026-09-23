@@ -18,10 +18,11 @@
 """
 from __future__ import annotations
 
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from queue import Queue
-from typing import Callable
+from typing import Callable, Iterator
 
 from app.core.config import (
     MAX_TARGETS,
@@ -30,10 +31,10 @@ from app.core.config import (
     get_settings,
 )
 from app.core.exceptions import (
-    GeneralLLMError,
     InvalidRequest,
     JevConnectionError,
 )
+from app.core.executors import shared_pool
 from app.core.logging import get_logger
 from app.domain.labels import RELATIONSHIPS, LabelLibrary, get_label_library
 from app.domain.transcript import parse_transcript
@@ -41,11 +42,47 @@ from app.services.classifier import ClassifierService
 from app.services.generation import GenerationService
 from app.services.review_pool import ReviewPool, confidence_flags
 
-logger = get_logger('gen')
+logger = get_logger('pipeline')
 
 NO_SPEAKER_HINT = ('没有识别到说话人。可以整段粘微信里复制出来的记录（名字 ⏎ 时间 ⏎ 内容），'
                    '也可以自己标注：「我：…」「她：…」，或用真实名字「林潇：…」「周屿：…」。')
 RETRY_PAUSE_SECONDS = 2
+# 共享线程池的名字（进程级复用，见 core/executors.py）：分类与生成各一个。
+JEV_POOL = 'jev'
+GEN_POOL = 'gen'
+
+
+def _cancelled(cancel: threading.Event | None) -> bool:
+    """客户端是否已经走了（断开 SSE / 关页面）。None 表示这次调用不关心取消。"""
+    return cancel is not None and cancel.is_set()
+
+
+# 说话人在展示层叫「我 / 对方」，在内部与上游协议里是 me / other。转换只在这里定义一次，
+# 不要各自写 `'我' if speaker == 'me' else '对方'`——两套写法漂移过一次，排查很费劲。
+SPEAKER_ME = '我'
+SPEAKER_OTHER = '对方'
+
+
+def speaker_label(speaker: object) -> str:
+    """内部码（me / other）→ 展示标签（我 / 对方）。"""
+    return SPEAKER_ME if speaker == 'me' else SPEAKER_OTHER
+
+
+def speaker_code(label: object) -> str:
+    """展示标签 → 内部码（从既有分析结果反推说话人时用）。"""
+    return 'me' if label == SPEAKER_ME else 'other'
+
+
+def _message_by_index(messages: list[dict], index: int) -> dict:
+    """按序号取消息。
+
+    失败事件只带序号，而收尾（`_finish_analyze` → `_envelope`）要的是消息本身——
+    序号都是自己发出去的，取不到说明流水线自身串了，直接抛比悄悄少一条更好查。
+    """
+    for message in messages:
+        if message['index'] == index:
+            return message
+    raise JevConnectionError('内部错误：失败的序号 {} 不在本次消息里'.format(index))
 
 
 def build_context(messages: list[dict], message: dict) -> str:
@@ -73,7 +110,8 @@ class PipelineService:
         self._pool = pool or ReviewPool()
 
     # ---------- 公共骨架 ----------
-    def _parse(self, transcript: str, me_label: str | None = None):
+    def _parse(self, transcript: str,
+               me_label: str | None = None) -> tuple[list[dict], list[dict], str | None]:
         """解析 + 说话人校验，返回 (messages, speakers, me_label)。"""
         messages, speakers, me_label = parse_transcript(transcript, me_label)
         speakers = [s for s in speakers if s['count']]
@@ -85,14 +123,15 @@ class PipelineService:
         return messages, speakers, me_label
 
     @staticmethod
-    def _assert_labels_exist(read_labels, speakers):
+    def _assert_labels_exist(read_labels: list[str], speakers: list[dict]) -> None:
         for label in read_labels:
             if not any(s['label'] == label for s in speakers):
                 raise InvalidRequest('要解读的「' + str(label) + '」不在这段记录里。可选的说话人：'
                                      + '、'.join(s['label'] for s in speakers))
 
-    def _classify_one(self, messages, message, relationship, want_interpretation=False,
-                      want_suggestions=False, record_pool=False,
+    def _classify_one(self, messages: list[dict], message: dict, relationship: str,
+                      want_interpretation: bool = False, want_suggestions: bool = False,
+                      record_pool: bool = False,
                       on_generation: Callable[[dict], None] | None = None) -> dict:
         """分类单条消息，包装成前端需要的形状（原 `work` / `jev_only`）。
 
@@ -111,51 +150,33 @@ class PipelineService:
         if record_pool and flags['pool_worthy']:
             self._pool.record(relationship, {'message': message['text'], 'context': context,
                                              'speaker': message['speaker']}, flags)
-        return {'index': message['index'], 'speaker': '我' if message['speaker'] == 'me' else '对方',
+        return {'index': message['index'], 'speaker': speaker_label(message['speaker']),
                 'label': message['label'], 'message': message['text'], 'context': context, 'result': result}
 
-    def _run_targets(self, messages, targets, relationship, gen_flags: Callable[[dict], tuple],
-                     record_pool: bool = False):
+    def _run_targets(self, messages: list[dict], targets: list[dict], relationship: str,
+                     gen_flags: Callable[[dict], tuple],
+                     record_pool: bool = False) -> tuple[list[dict], list[dict]]:
         """并发分类 + 断连补跑一轮；返回 (results, failed)，结果未排序。
 
         `gen_flags(message) -> (要不要潜台词, 要不要推荐回复)`，由调用方按勾选与消息位置决定。
+
+        非流式入口（脚本 / 夹具用）：**把流式实现的收成结果**，不再维护第二套并发 + 补跑逻辑
+        （原来这里和 `_run_targets_streaming` 是两份近似实现，改一处忘一处）。没有客户端断开
+        的概念，所以不传 cancel。
         """
-        workers = max(1, get_settings().jev_max_workers)
-
-        def work(message):
-            want_interpretation, want_suggestions = gen_flags(message)
-            return self._classify_one(messages, message, relationship,
-                                      want_interpretation=want_interpretation,
-                                      want_suggestions=want_suggestions, record_pool=record_pool)
-
-        def safe(message):
-            try:
-                return work(message), None
-            except JevConnectionError:
-                return None, message
-
         results, failed = [], []
-        if targets:
-            with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
-                for res, msg in pool.map(safe, targets):
-                    if res is None:
-                        failed.append(msg)
-                    else:
-                        results.append(res)
-        if failed:
-            time.sleep(RETRY_PAUSE_SECONDS)
-            retry_failed = []
-            with ThreadPoolExecutor(max_workers=min(workers, len(failed))) as pool:
-                for res, msg in pool.map(safe, failed):
-                    if res is None:
-                        retry_failed.append(msg)
-                    else:
-                        results.append(res)
-            failed = retry_failed
+        for event in self._run_targets_streaming(messages, targets, relationship, gen_flags,
+                                                record_pool=record_pool):
+            if event['type'] == 'message':
+                results.append(event['item'])
+            elif event['type'] == 'failed':
+                # 失败事件只带序号；这里还原成消息本身，和 _envelope 的口径一致。
+                failed.append(_message_by_index(messages, event['index']))
         return results, failed
 
     @staticmethod
-    def _reply_target(messages, results, fallback):
+    def _reply_target(messages: list[dict], results: list[dict],
+                      fallback: Callable[[dict], dict] | None) -> dict | None:
         """推荐回复始终锚定「全局最后一条消息」，而不是过滤后 targets 的最后一条。
 
         这样标题（不知道怎么回复 / 还想说点什么）和内容才不会错位。
@@ -174,8 +195,11 @@ class PipelineService:
         return last_item
 
     @staticmethod
-    def _envelope(relationship, messages, analyses, speakers, me_label, read_labels,
-                  others, selves, failed, gen_interpretation, gen_suggestions, reply_target):
+    def _envelope(relationship: str, messages: list[dict], analyses: list[dict],
+                  speakers: list[dict], me_label: str | None, read_labels: list[str],
+                  others: list[dict], selves: list[dict], failed: list[dict],
+                  gen_interpretation: bool, gen_suggestions: bool,
+                  reply_target: dict | None) -> dict:
         other_labels = [s['label'] for s in speakers if s['role'] == 'other']
         return {'version': VERSION, 'relationship': relationship, 'messages': messages,
                 'analyses': analyses,
@@ -189,59 +213,11 @@ class PipelineService:
                 'reply_target': reply_target}
 
     # ---------- 用例 1：整段分析 ----------
-    def analyze(self, data: dict) -> dict:
-        if not isinstance(data, dict) or not isinstance(data.get('transcript'), str):
-            raise InvalidRequest('请粘贴聊天记录。')
-        relationship = data.get('relationship')
-        if relationship not in RELATIONSHIPS:
-            raise InvalidRequest('请选择关系或场景。')
-        transcript = data['transcript'].strip()
-        if not transcript or len(transcript) > MAX_TRANSCRIPT_CHARS:
-            raise InvalidRequest('聊天记录不能为空，且需控制在 {} 字以内。'.format(MAX_TRANSCRIPT_CHARS))
+    def _analyze_setup(self, data: dict) -> dict:
+        """整段分析的公共准备：校验 → 解析 → 圈定解读对象 → 生成开关。
 
-        messages, speakers, me_label = self._parse(transcript, data.get('me_label') or None)
-        read_labels = self._resolve_read_labels(data, speakers, me_label)
-        self._assert_labels_exist(read_labels, speakers)
-        targets, others, selves = self._select_targets(messages, read_labels)
-
-        # 由前端两个勾选框控制：默认仅 Jev 分类；勾选「生成潜台词」才给每条解读对象调一次潜台词；
-        # 勾选「生成推荐回复」只对最后一个解读对象调一次（两条是各自独立的调用）。
-        gen_interpretation = bool(data.get('gen_interpretation'))
-        gen_suggestions = bool(data.get('gen_suggestions'))
-        last_target_index = targets[-1]['index']
-
-        def gen_flags(message):
-            # 推荐回复始终针对「最后一个解读对象」，而不是仅看 targets 的最后一条之外的其它消息。
-            # 这样即使解读对象没勾选「我」，最后一条由我发出时，标题和内容也能一致。
-            return (gen_interpretation,
-                    bool(gen_suggestions and message['index'] == last_target_index))
-
-        results, failed = self._run_targets(messages, targets, relationship, gen_flags,
-                                           record_pool=True)
-        if not results and failed:
-            # 整批都连不上：直接报连接失败，比回一堆空结果诚实。
-            raise JevConnectionError('Jev 上游暂时连接不上')
-        results.sort(key=lambda item: item['index'])
-        # 全局最后一条可能不在解读对象里（例如只解读对方、最后一条是我发的）：它不进 analyses，
-        # 但要作为 reply_target 存在，好让底部回复面板有锚点。它只跑推荐回复，不给潜台词。
-        reply_target = self._reply_target(
-            messages, results,
-            fallback=lambda msg: self._classify_one(messages, msg, relationship,
-                                                    want_interpretation=False,
-                                                    want_suggestions=gen_suggestions,
-                                                    record_pool=True))
-        return self._envelope(relationship, messages, results, speakers, me_label, read_labels,
-                              others, selves, failed, gen_interpretation, gen_suggestions,
-                              reply_target)
-
-    def analyze_stream(self, data: dict):
-        """整段分析的流式实现：每条消息一算完就推出去，卡片能一条条出现。
-
-        事件序列：`start` →（`delta` / `item` / `reset` / `message` / `retrying` / `failed`）*
-        → `done`。校验失败会直接抛（生成器还没 yield 过），由路由转成 `error` 事件。
-
-        为什么值得做：Jev 分类每条要 2 次调用（实测 13-15s/条），而它的私有协议不支持流式，
-        所以「等整批」才是主要体感；把每条结果尽早送出去，比逐字打字更管用。
+        `analyze` 与 `analyze_stream` 原本各自抄了一遍（连注释都不完全一样），改一处忘一处。
+        返回 dict 而不是长元组：调用方按名字取，将来加字段不用改所有解包点。
         """
         if not isinstance(data, dict) or not isinstance(data.get('transcript'), str):
             raise InvalidRequest('请粘贴聊天记录。')
@@ -264,38 +240,92 @@ class PipelineService:
         last_target_index = targets[-1]['index']
 
         def gen_flags(message):
+            # 推荐回复始终针对「最后一个解读对象」，而不是「targets 里除最后一条之外的其它消息」：
+            # 这样即使解读对象没勾选「我」，最后一条由我发出时标题和内容也能一致。
             return (gen_interpretation,
                     bool(gen_suggestions and message['index'] == last_target_index))
 
-        yield {'type': 'start', 'relationship': relationship, 'messages': messages,
-               'speakers': speakers, 'me_label': me_label, 'read_labels': list(read_labels),
-               'total': len(targets), 'gen_interpretation': gen_interpretation,
-               'gen_suggestions': gen_suggestions}
+        return {'relationship': relationship, 'messages': messages, 'speakers': speakers,
+                'me_label': me_label, 'read_labels': read_labels, 'targets': targets,
+                'others': others, 'selves': selves,
+                'gen_interpretation': gen_interpretation, 'gen_suggestions': gen_suggestions,
+                'gen_flags': gen_flags}
 
-        results, failed = [], []
-        for event in self._run_targets_streaming(messages, targets, relationship, gen_flags):
-            if event['type'] == 'message':
-                results.append(event['item'])
-            elif event['type'] == 'failed':
-                failed.append(event['index'])
-            yield event
+    def _finish_analyze(self, setup: dict, results: list[dict], failed: list[dict]) -> dict:
+        """收尾：整批失败即报连接错误 → 排序 → 定位 reply_target → 组装 envelope。
+
+        `failed` 必须是**消息列表**（不是序号列表）：`_envelope` 按 `item['index']` 取序号，
+        两条路径给的东西必须同型——曾经流式传的是序号，一遇「部分失败」就 TypeError，
+        前端只看到「分析没有正常结束」而且不会落库。
+        """
+        messages = setup['messages']
         if not results and failed:
-            # 整批都连不上：明确报错，比回一堆空结果诚实。
+            # 整批都连不上：直接报连接失败，比回一堆空结果诚实。
             raise JevConnectionError('Jev 上游暂时连接不上')
         results.sort(key=lambda item: item['index'])
+        gen_suggestions = setup['gen_suggestions']
         # 全局最后一条可能不在解读对象里（例如只解读对方、最后一条是我发的）：它不进 analyses，
         # 但要作为 reply_target 存在，好让底部回复面板有锚点。它只跑推荐回复，不给潜台词。
         reply_target = self._reply_target(
             messages, results,
-            fallback=lambda msg: self._classify_one(messages, msg, relationship,
+            fallback=lambda msg: self._classify_one(messages, msg, setup['relationship'],
                                                     want_interpretation=False,
                                                     want_suggestions=gen_suggestions,
                                                     record_pool=True))
-        yield {'type': 'done', 'data': self._envelope(
-            relationship, messages, results, speakers, me_label, read_labels, others, selves,
-            failed, gen_interpretation, gen_suggestions, reply_target)}
+        return self._envelope(setup['relationship'], messages, results, setup['speakers'],
+                              setup['me_label'], setup['read_labels'], setup['others'],
+                              setup['selves'], failed, setup['gen_interpretation'],
+                              gen_suggestions, reply_target)
 
-    def _run_targets_streaming(self, messages, targets, relationship, gen_flags):
+    def analyze(self, data: dict) -> dict:
+        """非流式整段分析（脚本 / 夹具用）：跑完流式实现再取收尾结果。"""
+        setup = self._analyze_setup(data)
+        results, failed = self._run_targets(setup['messages'], setup['targets'],
+                                            setup['relationship'], setup['gen_flags'],
+                                            record_pool=True)
+        return self._finish_analyze(setup, results, failed)
+
+    def analyze_stream(self, data: dict,
+                       cancel: threading.Event | None = None) -> Iterator[dict]:
+        """整段分析的流式实现：每条消息一算完就推出去，卡片能一条条出现。
+
+        事件序列：`start` →（`delta` / `item` / `reset` / `message` / `retrying` / `failed`）*
+        → `done`。校验失败会直接抛（生成器还没 yield 过），由路由转成 `error` 事件。
+
+        为什么值得做：Jev 分类每条要 2 次调用（实测 13-15s/条），而它的私有协议不支持流式，
+        所以「等整批」才是主要体感；把每条结果尽早送出去，比逐字打字更管用。
+
+        `cancel` 置位（客户端把页面关了 / 切走了）时停止提交剩下的消息，也不落库、不发 `done`
+        ——半截结果没人要，为它白写一条会话更糟。
+        """
+        setup = self._analyze_setup(data)
+        yield {'type': 'start', 'relationship': setup['relationship'],
+               'messages': setup['messages'], 'speakers': setup['speakers'],
+               'me_label': setup['me_label'], 'read_labels': list(setup['read_labels']),
+               'total': len(setup['targets']),
+               'gen_interpretation': setup['gen_interpretation'],
+               'gen_suggestions': setup['gen_suggestions']}
+
+        messages = setup['messages']
+        results, failed = [], []
+        for event in self._run_targets_streaming(messages, setup['targets'],
+                                                 setup['relationship'], setup['gen_flags'],
+                                                 cancel=cancel):
+            if event['type'] == 'message':
+                results.append(event['item'])
+            elif event['type'] == 'failed':
+                failed.append(_message_by_index(messages, event['index']))
+            yield event
+        if _cancelled(cancel):
+            # 客户端已经走了：不落库、不发 done（半截结果没人看）。
+            logger.info('整段分析被取消，已完成的 %s 条不落库', len(results))
+            return
+        yield {'type': 'done', 'data': self._finish_analyze(setup, results, failed)}
+
+    def _run_targets_streaming(self, messages: list[dict], targets: list[dict], relationship: str,
+                               gen_flags: Callable[[dict], tuple],
+                               cancel: threading.Event | None = None,
+                               record_pool: bool = True) -> Iterator[dict]:
         """并发分类 + 断连补跑，按完成顺序 yield 事件（生成层预览事件原样透传）。
 
         - `{'type': 'message', 'item': {...}}` 这一条算完了；
@@ -307,6 +337,7 @@ class PipelineService:
         """
         workers = max(1, get_settings().jev_max_workers)
         queue: Queue = Queue()
+        pool = shared_pool(JEV_POOL, workers)
 
         def work(message):
             want_interpretation, want_suggestions = gen_flags(message)
@@ -318,7 +349,8 @@ class PipelineService:
             try:
                 item = self._classify_one(messages, message, relationship,
                                           want_interpretation=want_interpretation,
-                                          want_suggestions=want_suggestions, record_pool=True,
+                                          want_suggestions=want_suggestions,
+                                          record_pool=record_pool,
                                           on_generation=emit)
             except JevConnectionError:
                 queue.put({'type': 'failed', 'index': index})
@@ -331,37 +363,46 @@ class PipelineService:
                 queue.put({'type': 'message', 'item': item, 'index': index})
 
         def drain(batch, final: bool):
-            """跑一批，按完成顺序 yield 事件；返回其中失败的消息（供上层补跑）。"""
+            """跑一批，按完成顺序 yield 事件；返回其中失败的消息（供上层补跑）。
+
+            刻意「边完成边补位」而不是一次性把整批 submit 进去：一次提交完的话，客户端断开
+            时剩下几十条早就排好队了，取消就没意义（照样全跑完）。窗口大小 = workers。
+            """
             trouble = []
-            remaining = len(batch)
-            with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
-                for message in batch:
-                    pool.submit(work, message)
-                while remaining:
-                    event = queue.get()
-                    if event['type'] == 'error':
-                        # 交给上层：sse_response 会把它转成一条 error 事件（HTTP 早已是 200）
-                        raise event['exc']
-                    if event['type'] == 'failed':
-                        remaining -= 1
-                        trouble.append(next(m for m in batch if m['index'] == event['index']))
-                        if not final:
-                            yield {'type': 'retrying', 'index': event['index']}
-                            continue
-                    elif event['type'] == 'message':
-                        remaining -= 1
-                    yield event
+            pending = deque(batch)
+            in_flight = 0
+            while pending or in_flight:
+                if _cancelled(cancel):
+                    logger.info('客户端已断开，剩下的 %s 条不再提交', len(pending))
+                    return trouble
+                while pending and in_flight < workers:
+                    pool.submit(work, pending.popleft())
+                    in_flight += 1
+                event = queue.get()
+                if event['type'] == 'error':
+                    # 交给上层：sse_response 会把它转成一条 error 事件（HTTP 早已是 200）
+                    raise event['exc']
+                if event['type'] == 'failed':
+                    in_flight -= 1
+                    trouble.append(next(m for m in batch if m['index'] == event['index']))
+                    if not final:
+                        yield {'type': 'retrying', 'index': event['index']}
+                        continue
+                elif event['type'] == 'message':
+                    in_flight -= 1
+                yield event
             return trouble
 
         if not targets:
             return
         trouble = yield from drain(list(targets), final=False)
-        if trouble:
+        if trouble and not _cancelled(cancel):
             time.sleep(RETRY_PAUSE_SECONDS)
             yield from drain(trouble, final=True)
 
     @staticmethod
-    def _resolve_read_labels(data: dict, speakers, me_label) -> list[str]:
+    def _resolve_read_labels(data: dict, speakers: list[dict],
+                             me_label: str | None) -> list[str]:
         """解读对象来自前端两步选择：read_labels 是被勾选的说话人列表（可含「我」）。
 
         旧契约 include_me=true 退化为「全部对方 + 我」，保证夹具与旧脚本仍能跑。
@@ -380,7 +421,8 @@ class PipelineService:
         return read_labels
 
     @staticmethod
-    def _select_targets(messages, read_labels):
+    def _select_targets(messages: list[dict],
+                        read_labels: list[str]) -> tuple[list[dict], list[dict], list[dict]]:
         targets_all = [m for m in messages if m['label'] in read_labels]
         if not targets_all:
             raise InvalidRequest('没有选中要解读的消息。请在第 2 步勾选至少一个说话人。')
@@ -396,9 +438,10 @@ class PipelineService:
         """只补跑潜台词：默认覆盖全部已有分析结果，可用 indexes 指定几条。"""
         return self._augment(data, kind='interpretation')
 
-    def interpret_stream(self, data: dict):
+    def interpret_stream(self, data: dict,
+                         cancel: threading.Event | None = None) -> Iterator[dict]:
         """潜台词补跑的流式版本（`/interpret-chat/stream` 用）。"""
-        return self._augment_stream(data, kind='interpretation')
+        return self._augment_stream(data, kind='interpretation', cancel=cancel)
 
     def suggest(self, data: dict) -> dict:
         """只补跑推荐回复：默认只跑全局最后一条，可用 indexes 指定几条。
@@ -408,9 +451,10 @@ class PipelineService:
         """
         return self._augment(data, kind='suggestions')
 
-    def suggest_stream(self, data: dict):
+    def suggest_stream(self, data: dict,
+                       cancel: threading.Event | None = None) -> Iterator[dict]:
         """推荐回复补跑的流式版本（`/suggest-chat/stream` 用）。"""
-        return self._augment_stream(data, kind='suggestions')
+        return self._augment_stream(data, kind='suggestions', cancel=cancel)
 
     def _augment(self, data: dict, kind: str) -> dict:
         """非流式入口：把流式实现跑到底，取最后一个 `done` 事件。
@@ -425,7 +469,8 @@ class PipelineService:
             raise InvalidRequest('生成任务异常结束，请重试。')
         return {key: value for key, value in done.items() if key != 'type'}
 
-    def _augment_stream(self, data: dict, kind: str):
+    def _augment_stream(self, data: dict, kind: str,
+                        cancel: threading.Event | None = None) -> Iterator[dict]:
         """补跑生成层的流式实现，yield 的事件序列：
 
         `start` →（`delta` / `item` / `reset`）* → `done`。
@@ -433,6 +478,9 @@ class PipelineService:
         - `start` 带上这次要跑哪些序号，前端可以先把这些条标成「生成中」；
         - `delta` / `item` 是预览（潜台词逐字、建议逐条），最终结果**只**认 `done`；
         - `done` 里是完整的 augmentations / failed_indexes，路由用它去合并会话。
+
+        `cancel` 置位（客户端断开）时停止提交剩下的任务，也不发 `done`——路由就不会去
+        合并一个半截结果。
         """
         prev, relationship = self._augment_prev(data)
         analyses = prev['analyses']
@@ -469,7 +517,7 @@ class PipelineService:
         yield {'type': 'start', 'kind': kind, 'relationship': relationship,
                'indexes': [job[0] for job in jobs], 'last_index': last_index}
         augmentations, failed_indexes = {}, []
-        for event in self._run_generation_jobs(jobs, relationship, kind):
+        for event in self._run_generation_jobs(jobs, relationship, kind, cancel=cancel):
             if event['type'] != 'result':
                 yield event
                 continue
@@ -477,23 +525,29 @@ class PipelineService:
             augmentations[str(index)] = event['augmentation']
             if event['augmentation'].get('gen_failed'):
                 failed_indexes.append(index)
+        if _cancelled(cancel):
+            logger.info('%s 补跑被取消，%s 条结果不合并', kind, len(augmentations))
+            return
         yield {'type': 'done', 'kind': kind, 'version': VERSION, 'relationship': relationship,
                'augmentations': augmentations, 'failed_indexes': failed_indexes,
                'last_index': last_index}
 
-    def _run_generation_jobs(self, jobs, relationship: str, kind: str):
+    def _run_generation_jobs(self, jobs: list[tuple], relationship: str, kind: str,
+                             cancel: threading.Event | None = None) -> Iterator[dict]:
         """并发跑生成任务，按事件真实到达顺序 yield。
 
         - 预览事件：`{'type': 'delta'|'item'|'reset', 'index': i, ...}`
         - 结果事件：`{'type': 'result', 'index': i, 'augmentation': {...}}`（成功或失败都有）
 
         工作线程只往队列里塞事件，主线程按到达顺序取——SSE 才能边生成边推，而不是等整批跑完。
+        与分类一样按滑动窗口提交：`cancel` 置位时剩下的任务不再进池。
         """
         if not jobs:
             return
         runner = self._generate_interpretation if kind == 'interpretation' else self._generate_suggestions
         workers = max(1, get_settings().gen_max_workers)
         queue: Queue = Queue()
+        pool = shared_pool(GEN_POOL, workers)
 
         def work(job):
             index = job[0]
@@ -510,18 +564,22 @@ class PipelineService:
                 augmentation = {'gen_failed': True, 'gen_error': str(exc)}
             queue.put({'type': 'result', 'index': index, 'augmentation': augmentation})
 
-        with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as pool:
-            for job in jobs:
-                pool.submit(work, job)
-            finished = 0
-            while finished < len(jobs):
-                event = queue.get()
-                if event['type'] == 'result':
-                    finished += 1
-                yield event
+        pending = deque(jobs)
+        in_flight = 0
+        while pending or in_flight:
+            if _cancelled(cancel):
+                logger.info('客户端已断开，生成层剩下的 %s 条不再提交', len(pending))
+                return
+            while pending and in_flight < workers:
+                pool.submit(work, pending.popleft())
+                in_flight += 1
+            event = queue.get()
+            if event['type'] == 'result':
+                in_flight -= 1
+            yield event
 
     @staticmethod
-    def _augment_prev(data: dict):
+    def _augment_prev(data: dict) -> tuple[dict, str]:
         """补跑类请求的公共校验：必须有上一次的分析结果，且关系类型有效。"""
         if not isinstance(data, dict):
             raise InvalidRequest('请求格式不正确。')
@@ -534,7 +592,7 @@ class PipelineService:
         return prev, relationship
 
     @staticmethod
-    def _augment_indexes(data: dict):
+    def _augment_indexes(data: dict) -> set[int] | None:
         """指定序号 = 单条模式；不传 = 默认范围（潜台词全体 / 推荐回复最后一条）。"""
         if data.get('indexes') is None:
             return None
@@ -544,7 +602,7 @@ class PipelineService:
         return wanted
 
     @staticmethod
-    def _augment_job(index: int, analysis: dict):
+    def _augment_job(index: int, analysis: dict) -> tuple | None:
         """够跑生成层的条件：这条之前拿到过 Jev 结果（连接失败被排除的跳过，可重跑 Jev 补）。"""
         result = analysis.get('result') or {}
         intent_result = result.get('primary_intent')
@@ -552,38 +610,39 @@ class PipelineService:
         if not isinstance(intent_result, dict) or not isinstance(emotion_result, dict):
             return None
         return (index, analysis.get('context', ''), analysis.get('message', ''),
-                'me' if analysis.get('speaker') == '我' else 'other',
-                intent_result, emotion_result)
+                speaker_code(analysis.get('speaker')), intent_result, emotion_result)
 
-    def _generate_interpretation(self, relationship: str, job, partial=None) -> tuple:
+    def _generate_interpretation(self, relationship: str, job: tuple,
+                                 partial: Callable[..., None] | None = None) -> tuple[int, dict]:
         """潜台词单条调用，失败只标记这一条，不影响其他条。
 
         `partial` 是流式预览回调（`partial(index, event)`），只有走流式端点时才有。
         """
-        index, context, message, speaker_code, intent_result, emotion_result = job
+        index, context, message, speaker, intent_result, emotion_result = job
         on_event = (lambda event: partial(index, event)) if partial else None
-        try:
-            content = self._generation.generate_interpretation(
-                relationship, context, message, speaker_code, intent_result, emotion_result,
-                on_event=on_event)
-        except GeneralLLMError as exc:
-            logger.warning('潜台词生成失败：%s', exc)
-            return index, {'gen_failed': True, 'gen_error': str(exc)}
+        outcome = self._generation.run_interpretation(
+            relationship, context, message, speaker, intent_result, emotion_result,
+            on_event=on_event)
+        if not outcome.ok:
+            # 补跑路径的失败标记一律用 gen_failed 作为**传输字段**：会话层的
+            # merge_augmentations 会按 kind 把它翻成 interpretation_failed / gen_failed
+            # （两边的语义不同，别在这里直接写 interpretation_failed，那样合并不认）。
+            return index, {'gen_failed': True, 'gen_error': outcome.error}
         # 只带潜台词字段：前端按「字段是否存在」合并，不会误清另一边的结果。
-        return index, dict(content.to_dict(), gen_failed=False, gen_error=None)
+        return index, dict(outcome.content.to_dict(), gen_failed=False, gen_error=None)
 
-    def _generate_suggestions(self, relationship: str, job, partial=None) -> tuple:
+    def _generate_suggestions(self, relationship: str, job: tuple,
+                              partial: Callable[..., None] | None = None) -> tuple[int, dict]:
         """推荐回复单条调用，失败只标记这一条，不影响其他条。"""
-        index, context, message, speaker_code, intent_result, emotion_result = job
+        index, context, message, speaker, intent_result, emotion_result = job
         on_event = (lambda event: partial(index, event)) if partial else None
-        try:
-            content = self._generation.generate_suggestions(
-                relationship, context, message, speaker_code, intent_result, emotion_result,
-                on_event=on_event)
-        except GeneralLLMError as exc:
-            logger.warning('推荐回复生成失败：%s', exc)
-            return index, {'gen_failed': True, 'gen_error': str(exc)}
-        return index, {'suggestions': content.suggestions, 'gen_failed': False, 'gen_error': None}
+        outcome = self._generation.run_suggestions(
+            relationship, context, message, speaker, intent_result, emotion_result,
+            on_event=on_event)
+        if not outcome.ok:
+            return index, {'gen_failed': True, 'gen_error': outcome.error}
+        return index, {'suggestions': outcome.content.suggestions,
+                       'gen_failed': False, 'gen_error': None}
 
     # ---------- 用例 3：追加新消息 ----------
     def append(self, data: dict) -> dict:

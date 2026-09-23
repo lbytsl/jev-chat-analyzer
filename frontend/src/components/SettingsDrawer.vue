@@ -2,12 +2,14 @@
 import { computed, ref, watch } from 'vue'
 
 import { getConfig, testConfig, updateConfig } from '@/api/client'
+import { useFocusTrap } from '@/composables/useFocusTrap'
+import { useAnalysisStore } from '@/stores/analysis'
+import { useUiStore } from '@/stores/ui'
 
-const props = defineProps({
-  open: { type: Boolean, default: false },
-})
-
-const emit = defineEmits(['close', 'saved'])
+// 面板开关在 ui store，保存后要刷新顶栏徽标（依赖 /health）走 analysis store：
+// 原来这两件事是 App 的 open prop + close/saved 两个 emit。
+const ui = useUiStore()
+const analysis = useAnalysisStore()
 
 // 左侧 Tab：分类层 / 生成层 / 输出设置，各自管一摊配置。
 const TABS = [
@@ -55,11 +57,21 @@ function profileHint(profile) {
   return '已配置 ' + profile.masked + '（留空 = 不改动）'
 }
 
+// 列表渲染用的稳定 key：**不能**用下标（删掉中间一套之后，Vue 会把后面的输入框当成
+// 「同一个」而复用，输入框里的文字和实际数据会错位），也不能用名字（改名途中可能重复）。
+// 它只活在界面里，提交时 payload() 按字段取名，不会发给服务端。
+let profileKeySeed = 0
+function nextProfileKey() {
+  profileKeySeed += 1
+  return 'profile-' + profileKeySeed
+}
+
 // 服务端回的是「打码后的样子」，密钥框一律留空：留空 = 不改动，不会被打码值覆盖掉。
 // source 记住这套在服务端原来的名字，改名后服务端靠它把原来的密钥接上。
 function toProfileForm(item) {
   const key = item.api_key || {}
   return {
+    key: nextProfileKey(),
     name: item.name || '',
     source: item.name || '',
     base_url: item.base_url || '',
@@ -124,7 +136,8 @@ function payload() {
 
 function addProfile() {
   generation.value.profiles.push(
-    { name: '', source: '', base_url: '', model: '', api_key: '', masked: '', configured: false })
+    { key: nextProfileKey(), name: '', source: '', base_url: '', model: '', api_key: '',
+      masked: '', configured: false })
   generation.value.activeIndex = generation.value.profiles.length - 1
 }
 
@@ -186,7 +199,9 @@ async function onSave() {
     // 保存后服务端已清缓存：这里重新读一次，顺带把打码值与启用状态刷新
     await load()
     setStatus('已保存，立即生效（不用重启服务）。')
-    emit('saved')
+    // 顶栏徽标依赖 /health：重新探一次才知道新配置是否可用。
+    await analysis.probe()
+    analysis.setStatus('模型配置已保存，立即生效。')
   } catch (err) {
     setStatus(err.message, true)
   } finally {
@@ -196,18 +211,22 @@ async function onSave() {
 
 // 点遮罩空白处关闭（点在卡片上不关）。
 function onMaskClick(event) {
-  if (event.target === event.currentTarget) emit('close')
+  if (event.target === event.currentTarget) ui.settingsOpen = false
 }
 
-watch(() => props.open, (open) => { if (open) load() })
+// 面板里全是输入框与按钮，键盘焦点必须关在卡片内、关掉后归还（见 useFocusTrap）。
+const cardEl = ref(null)
+useFocusTrap(cardEl, () => ui.settingsOpen)
+
+watch(() => ui.settingsOpen, (open) => { if (open) load() })
 </script>
 
 <template>
-  <div id="settingsModal" v-show="open" class="modal-mask" @click="onMaskClick">
-    <div class="modal settings-modal" role="dialog" aria-modal="true" aria-label="配置">
+  <div id="settingsModal" v-show="ui.settingsOpen" class="modal-mask" @click="onMaskClick">
+    <div ref="cardEl" class="modal settings-modal" role="dialog" aria-modal="true" aria-label="配置">
       <div class="settings-head">
         <h3>配置</h3>
-        <button type="button" class="close" aria-label="关闭配置" @click="emit('close')">×</button>
+        <button type="button" class="close" aria-label="关闭配置" @click="ui.settingsOpen = false">×</button>
       </div>
       <p class="muted">
         分类层（Jev）判定意图与情绪，生成层（OpenAI 兼容）写潜台词与回复建议。
@@ -274,7 +293,7 @@ watch(() => props.open, (open) => { if (open) load() })
             <div class="llm-profiles">
               <div
                 v-for="(profile, index) in generation.profiles"
-                :key="index"
+                :key="profile.key"
                 class="llm-profile"
                 :class="{ on: index === generation.activeIndex }"
               >

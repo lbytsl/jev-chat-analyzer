@@ -1,3 +1,4 @@
+import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 import { deleteSessions, getSession, listSessions } from '@/api/client'
@@ -5,10 +6,10 @@ import { deleteSessions, getSession, listSessions } from '@/api/client'
 /**
  * 会话列表：谁在列表里、当前是哪一条、多选删除。
  *
- * 只负责「列表 + 当前 id」这一层状态；会话内容的载入交给 useAnalysis.applySession，
+ * 只负责「列表 + 当前 id」这一层状态；会话内容的载入交给 analysis store 的 applySession，
  * 避免两处都持有同一份聊天数据。
  */
-export function useSessions() {
+export const useSessionsStore = defineStore('sessions', () => {
   const sessions = ref([])
   const total = ref(0)
   const currentId = ref(null)
@@ -78,4 +79,4 @@ export function useSessions() {
     sessions, total, currentId, loading, error, selectMode, selected,
     refresh, markCurrent, find, toggleSelect, setSelectMode, remove,
   }
-}
+})

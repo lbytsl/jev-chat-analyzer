@@ -15,6 +15,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.log
+# 覆盖率产物（`pytest --cov` / `pnpm run test --coverage` 生成，随时可重建）
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # ===== 虚拟环境（依赖清单见 pyproject.toml，用 uv sync 同步） =====
 .venv/

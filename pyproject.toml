@@ -19,8 +19,33 @@ dev = [
     "pytest==9.1.1",
     # 静态检查（`uv sync --no-dev` 不会拉它，不影响启动）
     "ruff==0.16.8",
+    # CI 里 `pytest --cov` 要用；门槛见 [tool.coverage.report]
+    "pytest-cov==7.1.0",
+    # 提交前钩子（.pre-commit-config.yaml）
+    "pre-commit==4.6.2",
 ]
 
 [tool.uv]
 # 纯应用、不作为包分发：uv sync 只装依赖，不把项目本身装进虚拟环境。
 package = false
+
+[tool.ruff]
+# 显式声明规则集。以前 `ruff check .` 的结果取决于本机隐式配置（同一份代码在两台机器上
+# 报的条数可能不同），CI 就没法拿它当门禁。这里钉住一组「约定俗成、且当前代码已经全绿」
+# 的规则；想收紧再往上加 —— UP / ISC / SIM / FLY 等偏风格的规则暂不纳入，
+# 因为项目刻意统一用 `.format()` 而不是 f-string（改口径要一次改完，别一半一半）。
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "B", "I"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/api/routes/pages.py"]   # 静态资源托管，靠手工冒烟验证
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# 实测 91%（2026-09-23）。定 85 是留出余量：只防下滑，不逼着为凑数字写测试。
+# 目前最低的几块是 clients/general_llm.py 60%、cli.py 60%（都是「只有真连上游才走得到」的路径）。
+fail_under = 85

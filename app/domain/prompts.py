@@ -6,10 +6,10 @@
 """
 from __future__ import annotations
 
+from app.domain.labels import WARM_INTENTS, LabelLibrary
+
 # 与 config.Settings.gen_suggestions_count 的默认值一致：提示词默认按 3 条写。
 DEFAULT_SUGGESTIONS_COUNT = 3
-
-from app.domain.labels import WARM_INTENTS, LabelLibrary
 
 _RULE_TAIL = ('关系类型只是背景，不是意图或情绪证据。判断依据是整句话在做的事，不是句里出现了哪些词：'
               '否认某种情绪、或只是提出一个具体请求时，按整句在做的事判断；但上下文里已经明确说出的事实和情绪，'
