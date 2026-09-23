@@ -1,0 +1,26 @@
+[project]
+name = "jev-chat-analyzer"
+version = "0.0.8"
+description = "恋爱职场大侦探：本地运行的聊天记录意图 / 情绪分析工具"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.53.0",
+    # httpx[socks] 会额外装 socksio：httpx 默认读环境变量里的代理，
+    # 本机若设了 all_proxy=socks5://… 而没有 socksio，请求会直接抛 ImportError。
+    "httpx[socks]==0.28.1",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    # 静态检查（`uv sync --no-dev` 不会拉它，不影响启动）
+    "ruff==0.16.8",
+]
+
+[tool.uv]
+# 纯应用、不作为包分发：uv sync 只装依赖，不把项目本身装进虚拟环境。
+package = false

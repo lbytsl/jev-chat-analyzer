@@ -1,0 +1,139 @@
+"""标签库：意图 / 情绪的定义、候选过滤与展示层叫法。
+
+标签库是「判定的锚点」，分三层读：
+
+1. 种子文件 `data/intents_seed.json`：53 个意图 + 42 个情绪标签 + 8 个情绪大类；
+2. 场景过滤：每个关系只给它「该场景出现过的标签」，天然杜绝跨场景借标签；
+3. 展示层 `display_names`：同一个归一化标签在不同关系下换叫法（模型完全不感知展示层，
+   所以换叫法不会重新引入锚点漂移）。
+
+情绪是三级结构（2026-09-23 定稿）：
+    一级 family（8 个大类，全场景通用）→ 二级标签（归一化名 + 一份定义，全场景唯一）
+    → 展示层 display_names（按关系换词）。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from app.core.config import INTENTS_SEED_PATH
+
+# 二期关系词汇：与前端下拉、intents_seed.json 的 scenarios 完全一致。
+RELATIONSHIPS: tuple[str, ...] = ('暧昧', '恋爱', '上下级', '同事')
+
+# 意图层和情绪层是分开判的，会判出互相打脸的组合：一句话被判成「打情骂俏」（定义里明写
+# "没有真怒气，是在拉近距离"），情绪却落在「生气了」（带真火气+放弃）。用户看到就是
+# "在调情 + 在发火"，说不通。这类话的负面措辞其实是撒娇，真情绪落在赌气/失落上，
+# 所以意图命中下面这些「亲昵」意图、而情绪大类判到硬负面时，把第二级候选换成柔软的两类。
+WARM_INTENTS: frozenset[str] = frozenset(
+    {'打情骂俏', '要贴贴', '求关注', '想你了', '整点浪漫', '认错求和', '报备安抚', '主动关心'})
+HARD_NEGATIVE_FAMILIES: frozenset[str] = frozenset({'生气', '冷淡抽离'})
+SOFT_NEGATIVE_FAMILIES: tuple[str, ...] = ('有怨气', '委屈难过')
+
+
+@dataclass(frozen=True, slots=True)
+class LabelLibrary:
+    """内存中的标签库。不可变，进程内共享一份。"""
+
+    intents: dict[str, dict]                     # label -> {definition, family, scenarios, ...}
+    emotions: dict[str, dict]
+    families: dict[str, dict]                    # family -> {definition}
+    intent_candidates: dict[str, dict[str, str]]  # relationship -> {label: definition}
+    emotion_candidates: dict[str, dict[str, str]]
+
+    @classmethod
+    def load(cls, path: Path | str) -> LabelLibrary:
+        seed = json.loads(Path(path).read_text(encoding='utf-8'))
+        intents = seed['intents']
+        emotions = seed['emotions']
+        return cls(
+            intents=intents,
+            emotions=emotions,
+            families=seed['emotion_families'],
+            intent_candidates={
+                rel: {label: d['definition'] for label, d in intents.items() if rel in d['scenarios']}
+                for rel in RELATIONSHIPS
+            },
+            emotion_candidates={
+                rel: {label: _emotion_definition(d, rel) for label, d in emotions.items() if rel in d['scenarios']}
+                for rel in RELATIONSHIPS
+            },
+        )
+
+    # ---------- 派生集合 ----------
+    @property
+    def family_order(self) -> list[str]:
+        return list(self.families)
+
+    @property
+    def generic_intents(self) -> frozenset[str]:
+        """`接住话了`/`陈述事实` 这类 family=中性 的泛化标签是库的兜底位。
+
+        它们几乎不携带信息，命中它们往往说明「没有更合适的标签」，而不是「这句话真的
+        只想接话」。实测这类样本模型反而很自信，只按置信度攒样本会漏掉全部「库缺标签」的
+        情况——所以泛化标签命中一律进回流池。
+        """
+        return frozenset(label for label, d in self.intents.items() if d.get('family') == '中性')
+
+    @property
+    def generic_emotions(self) -> frozenset[str]:
+        """情绪层的同类兜底桶：family=平静中性的标签（无情绪 / 稳住了）。
+
+        比意图层的兜底更危险——实测 120 条语料 55% 落进这里，且其中 94% 模型分差很大、
+        非常确定，置信度门控完全抓不到。所以一律进池，与意图层泛化标签同等待遇。
+        """
+        return frozenset(label for label, d in self.emotions.items() if d.get('family') == '平静中性')
+
+    # ---------- 查询 ----------
+    def intent_definition(self, label: str) -> str:
+        return self.intents[label]['definition']
+
+    def emotion_definition(self, label: str, relationship: str) -> str:
+        """取标签在指定场景下的定义；没有场景分化时回落到 definition。"""
+        return _emotion_definition(self.emotions[label], relationship)
+
+    def emotion_candidates_for(self, relationship: str, families=None) -> dict[str, str]:
+        """某关系下的情绪候选；families 非空时只取这些大类下的标签（两级路由的第二级）。
+
+        v008：第二级始终额外并入该场景的中性兜底标签（无情绪 / 稳住了）。
+        否则模型被锁进某个大类里，就算看不出情绪也只能硬挑一个沾边的——那正是要避免的瞎猜。
+        """
+        out = {}
+        for label, d in self.emotions.items():
+            if relationship not in d['scenarios']:
+                continue
+            if families is not None and d.get('family') not in families:
+                continue
+            out[label] = _emotion_definition(d, relationship)
+        if families is not None:
+            for label, d in self.emotions.items():
+                if relationship in d['scenarios'] and d.get('family') == '平静中性' and label not in out:
+                    out[label] = _emotion_definition(d, relationship)
+        return out
+
+    def family_display(self, family: str, relationship: str) -> str:
+        """一级大类退到展示层时的叫法。
+
+        大类本身是内部归类词（如「平静中性」），直接给用户看不是人话，得换成场景里的说法。
+        其余七类（开心 / 生气 / 有怨气 …）本身就是日常用词，原样返回即可。
+        """
+        if family == '平静中性':
+            return '看不出情绪' if relationship in ('暧昧', '恋爱') else '就事论事'
+        return family
+
+    def display_name(self, label: str, relationship: str) -> str:
+        """展示层叫法：同一个归一化标签在不同关系下换词给用户看。"""
+        entry = self.emotions.get(label) or {}
+        return (entry.get('display_names') or {}).get(relationship) or label
+
+
+def _emotion_definition(entry: dict, relationship: str) -> str:
+    return (entry.get('definitions') or {}).get(relationship) or entry['definition']
+
+
+@lru_cache(maxsize=1)
+def get_label_library() -> LabelLibrary:
+    """进程内单例标签库。测试可 `get_label_library.cache_clear()` 后指向临时文件。"""
+    return LabelLibrary.load(INTENTS_SEED_PATH)

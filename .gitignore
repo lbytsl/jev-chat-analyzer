@@ -1,6 +1,5 @@
 # ===== 密钥（绝对不能上传） =====
-# 真实 .env 在仓库外（../.env，即 2026-09-JEV/.env），不要把它拷进仓库。
-# 开源版请在仓库内放 .env.example，并把真实密钥填到你自己本地的 .env。
+# 真实 .env 就在仓库根目录（服务只读它），开源版请只提交 .env.example。
 .env
 .env.*
 *.env
@@ -13,6 +12,16 @@
 _backup/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# ===== 虚拟环境（依赖清单见 pyproject.toml，用 uv sync 同步） =====
+.venv/
+
+# ===== 前端（源码在 frontend/src，依赖与产物不入库） =====
+frontend/node_modules/
+frontend/dist/
 
 # ===== macOS 资源叉垃圾文件（每个真实文件旁自动生成的 ._xxx） =====
 ._*
@@ -20,9 +29,17 @@ __pycache__/
 .Spotlight-V100
 .Trashes
 
-# ===== 运行产物（回流池会自动重建，且可能攒入真实对话样本） =====
+# ===== 运行产物（回流池与回归结果会自动重建，且可能攒入真实对话样本） =====
+var/
 low_confidence_pool.json
 
 # ===== 内部实现笔记（非开源文档，不传） =====
 实现说明.md
 标签提案-恋爱补充.md
+.idea/.gitignore
+.idea/jev-chat-analyzer.iml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml

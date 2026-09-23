@@ -1,0 +1,7 @@
+# pnpm 11 起，构建脚本白名单从 package.json 的 pnpm 字段搬到了这里。
+#
+# esbuild 需要跑安装脚本（它按平台补齐二进制）。不放行的话 pnpm install 会以非零码
+# 退出（ERR_PNPM_IGNORED_BUILDS），而 `pnpm run build` 启动前会先跑一次依赖状态自检，
+# 于是构建被连带卡住 —— 表现是「安装看着成功、构建却报 pnpm install 失败」。
+allowBuilds:
+  esbuild: true

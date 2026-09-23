@@ -1,0 +1,439 @@
+/* ============================================================================
+   苹果毛玻璃主题层（务必在 main.css 之后加载）
+   ----------------------------------------------------------------------------
+   职责边界：这里只覆盖「外观」——颜色、描边、圆角、阴影、模糊、字体渲染。
+   尺寸、间距、层级、DOM 结构仍由 main.css 决定，所以这一层可以整块摘掉，
+   功能与布局不受影响。
+
+   毛玻璃的前提是「背后有东西可糊」：先用一层低饱和光晕铺满画布，玻璃面板
+   才有通透感和纵深；否则半透明白叠在白底上，和普通卡片看不出区别。
+   ============================================================================ */
+
+/* ===== 1. 主题变量与画布底色 ===== */
+:root{
+  /* 苹果优先的字体栈：-apple-system 在 macOS 上直接映射 SF Pro。 */
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+
+  --glass-fill:rgba(255,255,255,.54);
+  --glass-fill-strong:rgba(255,255,255,.78);
+  --glass-edge:rgba(255,255,255,.66);      /* 玻璃边缘：白色半透明描边 */
+  --hairline:rgba(60,60,67,.10);           /* 苹果的分隔发丝线 */
+  --hairline-strong:rgba(60,60,67,.16);
+  --elev-lg:0 22px 54px rgba(15,23,42,.12),0 2px 6px rgba(15,23,42,.05);
+  --elev-md:0 14px 38px rgba(15,23,42,.10),0 1px 3px rgba(15,23,42,.05);
+  --elev-sm:0 1px 3px rgba(15,23,42,.07);
+  --top-sheen:inset 0 1px 0 rgba(255,255,255,.72); /* 顶部高光，玻璃的「厚度」 */
+  --accent:#07c160;
+  --accent-deep:#0a9e52;
+}
+
+/* 字体渲染：苹果界面偏细且锐利，关掉次像素平滑更接近原生观感。 */
+body{
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  background:transparent;
+}
+
+/* 画布光晕：低饱和、大半径，只提供「有颜色可透」的底，不抢内容。 */
+body::before{
+  content:'';
+  position:fixed;
+  inset:0;
+  z-index:-1;
+  pointer-events:none;
+  background:
+    radial-gradient(48vw 54vh at 2% -10%,rgba(92,160,255,.62),transparent 58%),
+    radial-gradient(40vw 46vh at 100% -2%,rgba(255,140,192,.50),transparent 56%),
+    radial-gradient(52vw 50vh at 78% 106%,rgba(72,222,158,.54),transparent 58%),
+    radial-gradient(38vw 38vh at 22% 92%,rgba(160,146,255,.38),transparent 60%),
+    linear-gradient(160deg,#f3f6fc 0%,#e6ebf5 100%);
+}
+
+/* ===== 2. 顶栏 ===== */
+header{
+  background:linear-gradient(180deg,rgba(255,255,255,.74),rgba(255,255,255,.50));
+  backdrop-filter:blur(28px) saturate(180%);
+  -webkit-backdrop-filter:blur(28px) saturate(180%);
+  border-bottom:1px solid var(--hairline);
+}
+header b{letter-spacing:-.01em}
+
+.badge{
+  background:rgba(255,255,255,.72);
+  border:1px solid var(--glass-edge);
+  box-shadow:var(--elev-sm);
+}
+
+#settingsBtn{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--glass-edge);
+  border-radius:9px;
+  padding:8px 20px;
+  font-size:13.5px;
+  font-weight:500;
+  box-shadow:var(--elev-sm),var(--top-sheen);
+  transition:background .15s,box-shadow .15s;
+}
+#settingsBtn:hover{
+  background:rgba(255,255,255,.96);
+  border:1px solid var(--glass-edge);
+  box-shadow:0 2px 8px rgba(15,23,42,.10),var(--top-sheen);
+}
+
+/* ===== 3. 聊天主体 ===== */
+.wx-wrap{border-radius:20px}
+.wx{
+  background:var(--glass-fill);
+  backdrop-filter:blur(42px) saturate(190%);
+  -webkit-backdrop-filter:blur(42px) saturate(190%);
+  border:1px solid var(--glass-edge);
+  border-radius:20px;
+  box-shadow:var(--elev-lg),var(--top-sheen);
+}
+
+/* 侧栏 / 标题栏 / 输入栏：都在玻璃容器内部，只用半透明填充做出分区，
+   不再叠 backdrop-filter——嵌套模糊代价高，且只会糊到父级已经合成好的背景。 */
+.wx-side{
+  background:rgba(246,247,250,.44);
+  border-right:1px solid var(--hairline);
+}
+.wx-side .brand{letter-spacing:-.01em}
+
+.wx-search{
+  background:rgba(118,118,128,.10);
+  border-radius:8px;
+  color:#7c7c85;
+  padding:6px 10px;
+}
+.wx-item{border-radius:9px;transition:background .15s}
+.wx-item:hover{background:rgba(118,118,128,.08)}
+.wx-item.on,.session-item.on{background:rgba(118,118,128,.17)}
+
+.wx-title{
+  background:rgba(255,255,255,.50);
+  border-bottom:1px solid var(--hairline);
+}
+/* 消息区透明：让玻璃容器的底色与光晕透上来，卡片才会「浮」在上面。 */
+.wx-flow{background:transparent}
+.wx-bar{
+  background:rgba(255,255,255,.50);
+  border-top:1px solid var(--hairline);
+}
+
+/* ===== 4. 气泡与消息行 ===== */
+.bub{
+  background:rgba(255,255,255,.94);
+  border-radius:10px;
+  box-shadow:var(--elev-sm);
+}
+.bub::before{border-right-color:rgba(255,255,255,.94)}
+.row.me .bub{
+  background:#95ec69;
+  border-radius:10px;
+  box-shadow:0 1px 3px rgba(7,193,96,.18),inset 0 1px 0 rgba(255,255,255,.45);
+}
+.row.me .bub::before{border-left-color:#95ec69}
+
+.bub-name{font-size:11.5px;color:#8a8f99}
+/* 生成潜台词按钮：玻璃胶囊，hover 才显形，不跟气泡抢注意力。 */
+.bub-act{
+  background:rgba(255,255,255,.82);
+  border:1px solid rgba(7,193,96,.26);
+  color:var(--accent-deep);
+  box-shadow:var(--elev-sm);
+  transition:background .15s,border-color .15s,opacity .15s;
+}
+.bub-act:hover{background:rgba(7,193,96,.10);border-color:rgba(7,193,96,.44)}
+.bub-act.is-done{color:#6b7280;border-color:var(--hairline-strong);background:rgba(255,255,255,.70)}
+.bub-act.is-done:hover{background:rgba(60,60,67,.06);color:#3c3c43}
+
+/* ===== 5. 分析卡片 ===== */
+.note{
+  background:rgba(255,255,255,.82);
+  border:1px solid var(--glass-edge);
+  border-radius:16px;
+  /* 白色描边在浅底上分不出边界，再补半像素淡灰轮廓兜底。 */
+  box-shadow:0 10px 26px rgba(15,23,42,.07),var(--elev-sm),0 0 0 .5px rgba(60,60,67,.06);
+}
+/* 流式占位：虚线框保持「还没落地」的语义。 */
+.note-live{border-style:dashed;border-color:rgba(7,193,96,.34)}
+.basis,.nalt,.nrest{border-top-color:var(--hairline)}
+.raw{background:rgba(255,255,255,.66);border-color:var(--hairline-strong);border-radius:10px}
+
+/* ===== 6. 控件：按钮 / chips / 输入 ===== */
+button{border-radius:10px}
+
+.aug-btn{
+  background:linear-gradient(180deg,#2bcd77,#07c160);
+  border-radius:10px;
+  box-shadow:0 1px 3px rgba(7,193,96,.28),inset 0 1px 0 rgba(255,255,255,.30);
+}
+.aug-btn:hover{background:linear-gradient(180deg,#25c06e,#06ad56)}
+.aug-btn.ghost{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--hairline-strong);
+  box-shadow:var(--elev-sm);
+  color:var(--accent-deep);
+}
+.aug-btn.ghost:hover{background:rgba(255,255,255,.96);border-color:rgba(7,193,96,.35)}
+
+.cta{
+  background:linear-gradient(180deg,#2bcd77,#07c160);
+  border-radius:10px;
+  box-shadow:0 1px 3px rgba(7,193,96,.28),inset 0 1px 0 rgba(255,255,255,.30);
+}
+.cta:hover{background:linear-gradient(180deg,#25c06e,#06ad56)}
+
+.chip,.reply-mode{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--hairline-strong);
+  border-radius:9px;
+}
+.chip:hover,.reply-mode:hover{background:rgba(255,255,255,.96);border-color:rgba(7,193,96,.34)}
+.reply-mode.active{
+  background:rgba(7,193,96,.13);
+  border-color:rgba(7,193,96,.36);
+}
+.chip.is-me,.chip.is-read{background:rgba(7,193,96,.13);border-color:rgba(7,193,96,.30)}
+
+.reply-text{
+  background:rgba(255,255,255,.70);
+  border:1px solid var(--hairline-strong);
+  border-radius:10px;
+}
+.reply-text:focus{background:rgba(255,255,255,.95);border-color:rgba(7,193,96,.55)}
+.reply-copy{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--hairline-strong);
+  border-radius:9px;
+}
+.reply-hint{background:rgba(118,118,128,.08);border-left-color:var(--hairline-strong)}
+.reply-suggest.is-inline{background:rgba(255,255,255,.78);border-color:var(--glass-edge);box-shadow:var(--elev-md)}
+
+.session-new,.session-manage,.session-act{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--hairline-strong);
+  border-radius:8px;
+}
+.session-new:hover,.session-manage:hover,.session-act:hover{background:rgba(255,255,255,.98)}
+.session-bar{background:rgba(255,255,255,.72);border-radius:9px}
+.session-tag{background:rgba(118,118,128,.14);border-radius:5px}
+
+/* 统一的原生控件外观：去掉硬 outline，改用苹果的柔和聚焦光圈。 */
+textarea,select{
+  background:rgba(255,255,255,.72);
+  border:1px solid var(--hairline-strong);
+  border-radius:10px;
+}
+textarea:focus,select:focus{outline:none;border-color:rgba(7,193,96,.55);box-shadow:0 0 0 3.5px rgba(7,193,96,.15)}
+button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
+.cfg-field input:focus{outline:none}
+
+/* 追加消息弹窗用的是 id 选择器，优先级压过上面的通用规则，单独对齐一遍。 */
+#appendInput{background:rgba(255,255,255,.72);border:1px solid var(--hairline-strong)}
+#appendInput:focus{border-color:rgba(7,193,96,.55);box-shadow:0 0 0 3.5px rgba(7,193,96,.15)}
+
+/* 进度条 / 提示条 */
+.stream-bar{
+  background:rgba(7,193,96,.10);
+  border-bottom:1px solid rgba(7,193,96,.18);
+}
+.stream-bar.err{background:rgba(230,162,60,.12);border-bottom-color:rgba(230,162,60,.24)}
+.notice{background:rgba(255,246,236,.82);border:1px solid rgba(240,201,160,.6);border-radius:14px;backdrop-filter:blur(12px)}
+.empty strong{color:#4a4a55}
+
+/* ===== 7. 抽屉（配置 / 导入） ===== */
+.drawer{
+  background:rgba(252,253,255,.74);
+  backdrop-filter:blur(36px) saturate(180%);
+  -webkit-backdrop-filter:blur(36px) saturate(180%);
+  border-left:1px solid var(--glass-edge);
+  box-shadow:-24px 0 60px rgba(15,23,42,.14);
+}
+.close{
+  background:rgba(255,255,255,.80);
+  border:1px solid var(--hairline-strong);
+  border-radius:9px;
+  color:#6b7280;
+  transition:background .15s;
+}
+.close:hover{background:rgba(60,60,67,.08)}
+
+/* ===== 8. 弹窗与配置面板 ===== */
+.modal-mask{
+  background:rgba(18,22,32,.30);
+  backdrop-filter:blur(7px);
+  -webkit-backdrop-filter:blur(7px);
+}
+.modal{
+  background:rgba(252,253,255,.78);
+  backdrop-filter:blur(40px) saturate(180%);
+  -webkit-backdrop-filter:blur(40px) saturate(180%);
+  border:1px solid var(--glass-edge);
+  border-radius:20px;
+  box-shadow:0 32px 84px rgba(15,23,42,.26),0 2px 8px rgba(15,23,42,.08),var(--top-sheen);
+}
+
+/* --- 配置弹窗：头部 --- */
+#settingsModal .settings-modal{
+  width:min(700px,94vw);
+  padding:22px 24px 18px;
+}
+#settingsModal .settings-head{margin-bottom:0}
+#settingsModal .settings-head h3{font-size:17px;font-weight:700;letter-spacing:-.01em}
+#settingsModal .settings-modal>p.muted:not(.cfg-path){
+  margin:3px 0 0;
+  font-size:12.5px;
+  line-height:1.6;
+  color:#6b6b73;
+  /* 两行时让断句匀开，避免末尾只剩一个「务。」 */
+  text-wrap:balance;
+}
+
+/* --- 配置弹窗：Tab 改成顶部分段控件（DOM 不变，只把左侧栏掰成横排） ---
+   96px 的左栏在 680px 的弹窗里太局促，横排后输入框能拿回整行宽度。 */
+#settingsModal .settings-body{display:block;margin-top:14px}
+#settingsModal .settings-tabs{
+  flex-direction:row;
+  gap:2px;
+  padding:2px;
+  border-right:0;
+  padding-right:2px;
+  background:rgba(118,118,128,.10);
+  border-radius:10px;
+}
+#settingsModal .settings-tab{
+  flex:1;
+  text-align:center;
+  padding:7px 10px;
+  border:1px solid transparent;
+  border-radius:8px;
+  font-size:13px;
+  font-weight:500;
+  color:#3c3c43;
+  transition:background .15s,box-shadow .15s,color .15s;
+}
+#settingsModal .settings-tab:hover{background:rgba(255,255,255,.45);color:#202027}
+#settingsModal .settings-tab.on{
+  background:rgba(255,255,255,.94);
+  border-color:transparent;
+  color:#202027;
+  font-weight:600;
+  box-shadow:0 1px 3px rgba(15,23,42,.12),0 0 0 .5px rgba(60,60,67,.05);
+}
+
+/* --- 配置弹窗：分节玻璃卡 --- */
+#settingsModal .settings-pane{margin-top:12px}
+#settingsModal .settings-pane section{
+  background:rgba(255,255,255,.54);
+  border:1px solid var(--glass-edge);
+  border-radius:14px;
+  padding:14px 16px 15px;
+  box-shadow:var(--elev-sm);
+}
+#settingsModal .cfg-head{margin-bottom:10px}
+#settingsModal .cfg-head strong{font-size:13.5px;letter-spacing:-.005em}
+/* 端点走等宽字体 + 淡底标签，和正文拉开层级。 */
+#settingsModal .cfg-endpoint{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;
+  color:#6b7280;
+  background:rgba(118,118,128,.10);
+  border-radius:6px;
+  padding:2px 7px;
+}
+
+/* --- 配置弹窗：字段行 --- */
+#settingsModal .cfg-field{
+  grid-template-columns:88px 1fr;
+  gap:12px;
+  margin:9px 0;
+}
+#settingsModal .cfg-field>span{
+  font-size:12.5px;
+  font-weight:500;
+  color:#3c3c43;
+  text-align:right;
+}
+#settingsModal .cfg-field input{
+  font-size:13px;
+  padding:9px 11px;
+  border:1px solid var(--hairline-strong);
+  border-radius:10px;
+  background:rgba(255,255,255,.74);
+  box-shadow:inset 0 1px 2px rgba(15,23,42,.04);
+  transition:border-color .15s,box-shadow .15s,background .15s;
+}
+#settingsModal .cfg-field input:hover{border-color:rgba(60,60,67,.24)}
+#settingsModal .cfg-field input:focus{
+  border-color:rgba(7,193,96,.62);
+  background:rgba(255,255,255,.96);
+  box-shadow:0 0 0 3.5px rgba(7,193,96,.15);
+}
+#settingsModal .cfg-note{margin:11px 0 0;font-size:12px;line-height:1.65;color:#6b6b73}
+#settingsModal .cfg-test{margin:9px 0 0;font-size:12px}
+
+/* --- 配置弹窗：底部 --- */
+#settingsModal .cfg-path{
+  margin:14px 0 0;
+  padding-top:12px;
+  border-top:1px solid var(--hairline);
+  font-size:11.5px;
+  line-height:1.6;
+  color:#8a8f99;
+}
+#settingsModal .modal-actions{margin-top:12px;gap:9px}
+#settingsModal .modal-actions .aug-btn{
+  padding:9px 18px;
+  font-size:13px;
+  border-radius:10px;
+}
+
+/* ===== 9. 右键菜单 ===== */
+.ctx-mask{background:transparent}
+.ctx-menu{
+  background:rgba(252,253,255,.84);
+  backdrop-filter:blur(30px) saturate(180%);
+  -webkit-backdrop-filter:blur(30px) saturate(180%);
+  border:1px solid var(--glass-edge);
+  border-radius:12px;
+  box-shadow:0 16px 44px rgba(15,23,42,.20),var(--top-sheen);
+}
+.ctx-menu button{border-radius:7px}
+.ctx-menu button:hover:not(:disabled){background:rgba(7,193,96,.12)}
+
+/* ===== 10. 滚动条：苹果的细胶囊 ===== */
+.wx-flow::-webkit-scrollbar,
+.session-list::-webkit-scrollbar,
+.drawer::-webkit-scrollbar,
+.modal::-webkit-scrollbar{width:9px;height:9px}
+.wx-flow::-webkit-scrollbar-thumb,
+.session-list::-webkit-scrollbar-thumb,
+.drawer::-webkit-scrollbar-thumb,
+.modal::-webkit-scrollbar-thumb{
+  background:rgba(60,60,67,.20);
+  border:2.5px solid transparent;
+  background-clip:content-box;
+  border-radius:99px;
+}
+.wx-flow::-webkit-scrollbar-thumb:hover,
+.session-list::-webkit-scrollbar-thumb:hover,
+.drawer::-webkit-scrollbar-thumb:hover,
+.modal::-webkit-scrollbar-thumb:hover{background:rgba(60,60,67,.34);background-clip:content-box}
+.wx-flow::-webkit-scrollbar-track,
+.session-list::-webkit-scrollbar-track,
+.drawer::-webkit-scrollbar-track,
+.modal::-webkit-scrollbar-track{background:transparent}
+
+/* ===== 11. 窄屏兜底 ===== */
+@media (max-width:820px){
+  .wx-wrap,.wx{border-radius:16px}
+  .modal-mask{padding:14px}
+  .modal{border-radius:16px;padding:16px}
+}
+@media (max-width:560px){
+  #settingsModal .settings-tab{font-size:12px;padding:7px 4px}
+  /* 窄屏标签横排会挤，改成上下两行。 */
+  #settingsModal .cfg-field{grid-template-columns:1fr;gap:6px;margin:11px 0}
+  #settingsModal .cfg-field>span{text-align:left}
+}
