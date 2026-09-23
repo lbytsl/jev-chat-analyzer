@@ -422,6 +422,9 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 .ctx-menu button{border-radius:7px}
 .ctx-menu button:hover:not(:disabled){background:rgba(7,193,96,.12)}
 
+/* 右键提示条：外观与玻璃面板同源，半透明淡入，不抢对话区。 */
+.flow-hint{background:rgba(255,255,255,.50);border-bottom:1px solid var(--hairline);color:#56627a}
+
 /* ===== 10. 滚动条：苹果的细胶囊 ===== */
 .wx-flow::-webkit-scrollbar,
 .session-list::-webkit-scrollbar,

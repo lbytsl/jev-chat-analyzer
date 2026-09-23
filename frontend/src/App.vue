@@ -57,6 +57,10 @@ const appendDraft = ref('')
 const replyText = ref('')
 const copyState = ref('') // '' | 'done' | 'fail'
 
+// 顶栏下方的右键提示条：首次用的人不知道气泡能右键，给个可关闭的引导（本次会话内隐藏）。
+const showRightClickHint = ref(true)
+function dismissHint() { showRightClickHint.value = false }
+
 const names = computed(() => ({
   me: lastData.value?.me_label || '我',
   other: lastData.value?.other_label || '她',
@@ -212,6 +216,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown))
 <template>
   <header>
     <div class="brand-row">
+      <img src="/favicon.svg" class="brand-logo" alt="恋爱·职场聊天神器" />
       <b>恋爱·职场聊天神器</b>
       <span class="badge" :class="badge.cls">{{ badge.text }}</span>
     </div>
@@ -259,6 +264,11 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown))
               @suggest="runSuggestions()"
               @open="openAppend"
             />
+          </div>
+          <!-- 右键提示：让首次用的人知道气泡可以右键单独生成。可关闭，关掉后本次会话不再出现。 -->
+          <div v-if="analyzed && showRightClickHint" class="flow-hint" role="note">
+            <span class="flow-hint-text">提示：右键任意一条消息气泡，可单独生成「潜台词 / 推荐回复 / 一键生成」。</span>
+            <button type="button" class="flow-hint-close" aria-label="关闭提示" @click="dismissHint">×</button>
           </div>
           <!-- 分析进行中的进度。抽屉已经收起，不在这里显示就完全看不到跑到哪一步了。 -->
           <div v-if="busy && statusText" class="stream-bar" :class="{ err: statusErr }">

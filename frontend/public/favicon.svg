@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="恋爱·职场聊天神器">
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#19d989"/>
+      <stop offset="1" stop-color="#0a9c8f"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.42"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角方形背景 + 毛玻璃高光 -->
+  <rect x="28" y="28" width="456" height="456" rx="120" fill="url(#bg)"/>
+  <rect x="28" y="28" width="456" height="456" rx="120" fill="url(#sheen)"/>
+
+  <!-- 对话气泡（毛玻璃白） -->
+  <g>
+    <rect x="120" y="146" width="264" height="184" rx="42" fill="#ffffff" fill-opacity="0.96"/>
+    <path d="M168 322 L168 366 L214 322 Z" fill="#ffffff" fill-opacity="0.96"/>
+  </g>
+
+  <!-- 恋爱 / 暧昧：心形 -->
+  <path transform="translate(250,206) scale(0.92)" fill="#ff5e87"
+        d="M0,-8 C0,-22 -22,-34 -42,-20 C-64,-4 -52,26 -22,52 L0,72 L22,52 C52,26 64,-4 42,-20 C22,-34 0,-22 0,-8 Z"/>
+
+  <!-- 分析神器：放大镜（探出气泡右下，落在绿背景上） -->
+  <g fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round">
+    <circle cx="346" cy="298" r="46"/>
+    <line x1="380" y1="332" x2="418" y2="372"/>
+  </g>
+</svg>
