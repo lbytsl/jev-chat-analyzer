@@ -82,7 +82,7 @@ main.py → api/ → services/ → { domain/, clients/, repositories/ } → core
 ### 配置优先级
 真实环境变量（shell 里 `export` 的）**优先于** `.env`；界面保存是「按行合并」写回 `.env`（只替换目标键那一行，注释 / 顺序 / 其它键不动、密钥留空 = 不改动），保存后清空配置与各服务实例缓存，**下一次请求即用新配置，不用重启**。
 
-### 生成层的多套配置（v009）
+### 生成层的多套配置（v1.0.0）
 生成层可以保存多套「地址 + 模型 + 密钥」并切换启用哪套：整表存 `.env` 的 `LLM_PROFILES`（单行 JSON），
 启用的名字存 `LLM_ACTIVE`。**多套只存在于配置层**：`Settings.model_post_init` 会把「当前启用」那套
 落到 `deepseek_base_url / deepseek_model / deepseek_api_key` 三个老字段上，所以 `clients/general_llm.py`

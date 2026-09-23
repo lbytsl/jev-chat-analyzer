@@ -315,7 +315,7 @@ class TestConfigApi:
         assert body['classification']['ok'] is True and body['generation']['ok'] is True
 
 
-# ===== 生成层多套配置（v009） =====
+# ===== 生成层多套配置（v1.0.0） =====
 PROFILES = [
     {'name': 'DeepSeek 官方', 'base_url': 'https://api.deepseek.com', 'model': 'deepseek-chat',
      'api_key': 'sk-aaa1111'},

@@ -46,8 +46,8 @@ const badge = computed(() => {
   const info = health.value
   if (!info) return { text: '服务未连接', cls: 'bad' }
   if (!info.ok) return { text: 'Jev 未配置 · ' + info.version, cls: 'bad' }
-  if (info.general_llm === '缺失') return { text: '生成层未配置 · ' + info.version, cls: 'warn' }
-  return { text: 'Jev + 生成层已连接 · ' + info.version, cls: 'ok' }
+  if (info.general_llm === '缺失') return { text: 'LLM层未配置 · ' + info.version, cls: 'warn' }
+  return { text: 'Jev + LLM层已连接 · ' + info.version, cls: 'ok' }
 })
 
 const drawerOpen = ref(false)
@@ -221,6 +221,22 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown))
       <span class="badge" :class="badge.cls">{{ badge.text }}</span>
     </div>
     <div class="header-right">
+      <a
+        class="gh-link"
+        href="https://dream.mindweave.top/about"
+        target="_blank"
+        rel="noopener noreferrer"
+        title="个人博客"
+        aria-label="个人博客"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <g fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="8" r="6.4"/>
+            <ellipse cx="8" cy="8" rx="2.9" ry="6.4"/>
+            <path d="M1.8 8h12.4"/>
+          </g>
+        </svg>
+      </a>
       <a
         class="gh-link"
         href="https://github.com/lbytsl/jev-chat-analyzer"

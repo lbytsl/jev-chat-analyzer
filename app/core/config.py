@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 对外暴露的版本号：/health 与响应头 X-Jev 都取它，启动脚本也靠它比对「端口上跑的是不是当前代码」。
-VERSION = 'v009'
+VERSION = 'v1.0.0'
 
 # ===== 路径 =====
 BASE_DIR = Path(__file__).resolve().parents[2]          # 仓库根目录

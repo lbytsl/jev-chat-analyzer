@@ -33,6 +33,9 @@ frontend/dist/
 var/
 low_confidence_pool.json
 
+# ===== 本地生成的发布包（可以重新打，不入库） =====
+jev-chat-analyzer-*.zip
+
 # ===== Playwright CLI 录制产物（自动化临时文件，非源码） =====
 .playwright-cli/
 
