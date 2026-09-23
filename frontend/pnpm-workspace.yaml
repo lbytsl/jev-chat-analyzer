@@ -6,8 +6,9 @@
 allowBuilds:
   esbuild: true
 
-# 本机全局 pnpm 为 12.5.1，而 package.json 里 pin 了 pnpm@11.21.0。默认情况下 pnpm
-# 会尝试引导安装 11.21.0，并在 Windows 上因符号链接报 os error 448（ERROR_UNTRUSTED_MOUNT_POINT，
+# package.json 里 pin 的版本已与本机全局 pnpm（12.5.1）对齐，正常情况不会走到这里。
+# 留着 ignore 是给「另一台机器上全局 pnpm 与 pin 不一致」兜底：默认情况下 pnpm 会先引导安装
+# pin 的版本，而在 Windows 上那一步会因符号链接报 os error 448（ERROR_UNTRUSTED_MOUNT_POINT，
 # 不受信任的装入点），表现为 ERR_PNPM_PACKAGE_MANAGER_INSPECT_OPTIONAL_DEPENDENCY。
 # ignore = 直接跳过版本检查，使用本机已安装的 pnpm（不下载 pin 的版本）。
 # 注意：pnpm 12 起 managePackageManagerVersions 已被移除，由 pmOnFail 取代；

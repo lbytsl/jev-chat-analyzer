@@ -39,9 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 版本取自 frontend/package.json 的 packageManager 字段
+      # 版本只从 frontend/package.json 的 packageManager 字段读（单一来源，不在这里重复写死）。
+      # 必须显式指定文件：本仓库的 package.json 在子目录里，根目录没有，
+      # action 默认去根目录找 package.json，找不到就报 "No pnpm version is specified"。
       - name: 装 pnpm
         uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
 
       - name: 装 Node
         uses: actions/setup-node@v4
