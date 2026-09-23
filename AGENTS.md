@@ -82,6 +82,21 @@ main.py → api/ → services/ → { domain/, clients/, repositories/ } → core
 ### 配置优先级
 真实环境变量（shell 里 `export` 的）**优先于** `.env`；界面保存是「按行合并」写回 `.env`（只替换目标键那一行，注释 / 顺序 / 其它键不动、密钥留空 = 不改动），保存后清空配置与各服务实例缓存，**下一次请求即用新配置，不用重启**。
 
+### 生成层的多套配置（v009）
+生成层可以保存多套「地址 + 模型 + 密钥」并切换启用哪套：整表存 `.env` 的 `LLM_PROFILES`（单行 JSON），
+启用的名字存 `LLM_ACTIVE`。**多套只存在于配置层**：`Settings.model_post_init` 会把「当前启用」那套
+落到 `deepseek_base_url / deepseek_model / deepseek_api_key` 三个老字段上，所以 `clients/general_llm.py`
+与生成链路不知道多套配置的存在，改切换只动 `core/config.py` 一处。两个键都没写过（老 `.env` / 脚本 / 夹具）
+时回退 `DEEPSEEK_*`，行为不变；`LLM_PROFILES` 解析失败也只回退 + 提示，不抛异常。
+界面提交 `profiles` = 整表替换（增删改都在里面），提交 `active` = 只切换；密钥留空按**配置名字**沿用旧值
+（界面只拿得到打码值，这条不能少）。`.env` 存 JSON 因此 `core/env_file.py` 的读写转义必须对称。
+
+生成层**不是「DeepSeek 专用」**：它可以是任意 OpenAI 兼容端点，所以
+1) 端点规则与 Jev 一致（`GeneralLLMClient.endpoint` 是唯一判定处）：填前缀自动补 `/chat/completions`，
+填完整端点原样使用——**别在别处再拼一次**（`services/settings.py` 也是调它算给界面看的 endpoint）；
+2) 报错文案不许写死上游名，一律「模型名 + 实际请求地址 + 上游返回」，404 另外点明「接口地址或模型名不对」，
+否则用户换了模型根本不知道在说谁。
+
 ### 前端（只展示与编排）
 前端只做展示与状态编排，分类 / 提示词 / 标签库等业务规则全在后端，**不要在 `frontend/` 里补一份实现**。**唯一刻意外置的双份逻辑是说话人识别**：`utils/transcript.js` 与后端 `domain/transcript.py` 必须同步改（两处注释已标注），否则实时 chips 与落库结果会不一致。
 

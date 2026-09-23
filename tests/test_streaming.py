@@ -242,6 +242,42 @@ class TestStreamJson:
         assert len(fake.bodies) == 1
 
 
+# ---------- 端点写法与报错文案（生成层不是「DeepSeek 专用」） ----------
+class TestClientEndpointAndErrors:
+    def test_base_url_with_or_without_the_chat_path(self):
+        """两种写法都认：填到 /v1 自动补 /chat/completions；粘完整端点则原样用。"""
+        from app.core.config import Settings
+
+        def client(base_url):
+            return general_llm.GeneralLLMClient(
+                settings=Settings(deepseek_base_url=base_url, llm_profiles=''))
+
+        assert client('https://api.stepfun.com/v1').endpoint == \
+            'https://api.stepfun.com/v1/chat/completions'
+        assert client('https://api.stepfun.com/step_plan/v1/chat/completions').endpoint == \
+            'https://api.stepfun.com/step_plan/v1/chat/completions'
+
+    def test_http_404_names_the_model_and_the_requested_url(self, monkeypatch):
+        fake = FakeClient([FakeStreamResponse(status_code=404, text='{"error": "not found"}')])
+        monkeypatch.setattr(general_llm.httpx, 'Client', lambda **_: fake)
+        client = general_llm.GeneralLLMClient(settings=settings(
+            deepseek_model='step-5-preview', deepseek_base_url='https://api.stepfun.com/v1'))
+        with pytest.raises(GeneralLLMError) as info:
+            client.stream_json('sys', 'user')
+        message = str(info.value)
+        assert 'step-5-preview' in message, '报错要说清是哪套配置（模型名）出的问题'
+        assert 'https://api.stepfun.com/v1/chat/completions' in message, '要带上实际请求的地址'
+        assert 'DeepSeek' not in message, '生成层可以换任意端点，文案不许写死成某一家'
+        assert len(fake.bodies) == 1, '404 属于不可重试'
+
+    def test_missing_key_points_at_the_current_profile(self):
+        client = general_llm.GeneralLLMClient(
+            settings=settings(deepseek_api_key='', deepseek_model='qwen-plus'))
+        with pytest.raises(GeneralLLMError) as info:
+            client.complete_json('sys', 'user')
+        assert 'qwen-plus' in str(info.value) and '生成层' in str(info.value)
+
+
 # ---------- 流水线事件 ----------
 class TestPipelineStreams:
     def test_interpret_stream_emits_preview_then_done(self, tmp_path):
@@ -318,6 +354,23 @@ class TestPipelineStreams:
         assert [e['type'] for e in events].count('retrying') == 1
         assert not [e for e in events if e['type'] == 'failed']
         assert events[-1]['data']['failed_count'] == 0
+
+    def test_upstream_rejection_surfaces_instead_of_hanging(self, tmp_path):
+        """上游直接拒绝（401/400）必须原地抛错，不能卡在等事件上。
+
+        用户真踩过：分类层 401 时流式请求永不返回——前端一直「生成中」，
+        既没有 done 事件、也不会落库，看起来就像「解析完什么都没保存」。
+        """
+        from app.core.exceptions import JevAPIError
+        from tests.conftest import FakeClassifier, FakeGeneration
+        from app.services.pipeline import PipelineService
+        from app.services.review_pool import ReviewPool
+
+        service = PipelineService(classifier=FakeClassifier(error=JevAPIError(401, 'unauthorized')),
+                                  generation=FakeGeneration(),
+                                  pool=ReviewPool(path=tmp_path / 'pool.json'))
+        with pytest.raises(JevAPIError, match='401'):
+            list(service.analyze_stream({'transcript': TRANSCRIPT, 'relationship': '恋爱'}))
 
     def test_analyze_stream_raises_when_everything_fails(self, tmp_path):
         from app.core.exceptions import JevConnectionError
@@ -405,3 +458,28 @@ class TestStreamEndpoints:
         plain = http.post('/analyze-chat', json={'transcript': TRANSCRIPT, 'relationship': '网友'},
                           headers=JSON)
         assert events[-1]['message'] == plain.json()['error'], '两条路径的错误文案必须一致'
+
+    def test_upstream_rejection_becomes_an_error_event_and_stores_nothing(self, tmp_path):
+        """端到端：上游拒绝 → 收到 error 事件（HTTP 仍 200），且不落库。
+
+        「分析成功才存档」是刻意口径：整体失败时不往侧栏塞一条空记录。
+        """
+        from app.core.exceptions import JevAPIError
+        from app.repositories.session_store import SessionStore
+        from app.services.pipeline import PipelineService
+        from app.services.review_pool import ReviewPool
+        from app.services.sessions import SessionService
+        from tests.conftest import FakeClassifier, FakeGeneration
+
+        pipeline = PipelineService(classifier=FakeClassifier(error=JevAPIError(401, 'unauthorized')),
+                                   generation=FakeGeneration(),
+                                   pool=ReviewPool(path=tmp_path / 'pool.json'))
+        sessions = SessionService(SessionStore(tmp_path / 'sessions.db'))
+        http = make_client(pipeline=pipeline, sessions=sessions)
+        events = events_of(http.post('/analyze-chat/stream',
+                                     json={'transcript': TRANSCRIPT, 'relationship': '恋爱'},
+                                     headers=JSON))
+        assert events[-1]['type'] == 'error'
+        assert events[-1]['code'] == 'JEV_HTTP_401' and events[-1]['status'] == 502
+        assert '401' in events[-1]['message']
+        assert sessions.list_sessions()['total'] == 0, '整体失败不该留下会话记录'

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { formatSessionTime } from '@/utils/time'
 
 const props = defineProps({
@@ -24,6 +24,15 @@ const keyword = ref('')
 // autocomplete="off" 对密码管理器无效，必须用 new-password 才不会被当成可填充的凭据字段；
 // 再配一个每次加载都不同的随机 name，避免浏览器按字段名把历史记录关联进来。
 const searchName = 'q' + Math.random().toString(36).slice(2, 8)
+// 光靠 autocomplete 还不够：浏览器会把这行普通输入框当成可填充字段，把上次输过的东西
+// （比如模型名）直接填进来，看起来就像「会话记录不见了」。readonly 是唯一稳定的拦截手段——
+// 挂载后保持只读，用户真的来点（pointerdown / focus）才解锁，解锁后浏览器不会再改它。
+const touched = ref(false)
+
+onMounted(() => {
+  // 兜底：个别浏览器在挂载之后才异步填充，用户没碰过就清掉（碰过的绝不覆盖）
+  window.setTimeout(() => { if (!touched.value) keyword.value = '' }, 200)
+})
 const filteredSessions = computed(() => {
   const query = keyword.value.trim().toLowerCase()
   if (!query) return props.sessions
@@ -52,11 +61,14 @@ const filteredSessions = computed(() => {
       v-model="keyword"
       class="wx-search"
       type="text"
-      placeholder="搜索会话"
+      placeholder="搜索会话（标题 / 内容 / 场景）"
       aria-label="搜索会话"
       autocomplete="new-password"
       spellcheck="false"
       :name="searchName"
+      :readonly="!touched"
+      @pointerdown="touched = true"
+      @focus="touched = true"
     >
     <div class="session-list">
       <div
@@ -96,7 +108,8 @@ const filteredSessions = computed(() => {
         {{ loading ? '正在读取会话…' : '还没有会话。点上面「导入聊天」开始，记录会自动存下来。' }}
       </div>
       <div v-else-if="!filteredSessions.length" class="session-empty">
-        没有匹配「{{ keyword.trim() }}」的会话。
+        <p>没有匹配「{{ keyword.trim() }}」的会话。</p>
+        <button type="button" class="session-clear" @click="keyword = ''">清空搜索，看全部会话</button>
       </div>
     </div>
     <div v-if="selectMode" class="session-bar">

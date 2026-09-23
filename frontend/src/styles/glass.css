@@ -225,12 +225,15 @@ button{border-radius:10px}
 .reply-hint{background:rgba(118,118,128,.08);border-left-color:var(--hairline-strong)}
 .reply-suggest.is-inline{background:rgba(255,255,255,.78);border-color:var(--glass-edge);box-shadow:var(--elev-md)}
 
-.session-new,.session-manage,.session-act{
+.session-new,.session-manage,.session-act,.session-clear{
   background:rgba(255,255,255,.80);
   border:1px solid var(--hairline-strong);
   border-radius:8px;
 }
-.session-new:hover,.session-manage:hover,.session-act:hover{background:rgba(255,255,255,.98)}
+.session-new:hover,.session-manage:hover,.session-act:hover,.session-clear:hover{background:rgba(255,255,255,.98)}
+/* 搜索无结果时的出口：把模型名之类的文本粘进搜索框很常见，得让人一眼知道怎么退回去。 */
+.session-empty p{margin:0 0 8px}
+.session-clear{font:inherit;font-size:12px;padding:4px 10px;cursor:pointer;color:#3c3c43}
 /* 「管理」选中态（.on）是绿底白字，但上面这条 hover 会把背景刷成近白色，文字仍是白色
    → 悬浮时字就看不见了。用更高优先级把 .on 锁回绿色系。 */
 .session-manage.on,
@@ -392,6 +395,54 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 }
 #settingsModal .cfg-note{margin:11px 0 0;font-size:12px;line-height:1.65;color:#6b6b73}
 #settingsModal .cfg-test{margin:9px 0 0;font-size:12px}
+
+/* --- 配置弹窗：生成层的多套模型配置 ---
+   每套一张卡，左侧圆点选启用；启用的那张描边 + 淡绿底，一眼能看出当前用哪套。 */
+#settingsModal .llm-profiles{margin-top:12px}
+#settingsModal .llm-profile{
+  border:1px solid var(--hairline-strong);
+  border-radius:12px;
+  padding:9px 12px 3px;
+  margin-bottom:10px;
+  background:rgba(255,255,255,.46);
+  transition:border-color .15s,box-shadow .15s,background .15s;
+}
+#settingsModal .llm-profile.on{
+  border-color:rgba(7,193,96,.45);
+  background:rgba(7,193,96,.06);
+  box-shadow:0 0 0 3px rgba(7,193,96,.10);
+}
+#settingsModal .llm-profile-head{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  margin-bottom:4px;
+}
+#settingsModal .llm-pick{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 190px}
+#settingsModal .llm-pick input[type=radio]{flex:none;margin:0;accent-color:#07c160;cursor:pointer}
+#settingsModal .llm-name{
+  flex:1;min-width:0;font:inherit;font-size:13px;font-weight:600;
+  padding:6px 8px;border:1px solid transparent;border-radius:8px;
+  background:transparent;color:#202027;
+  transition:border-color .15s,background .15s,box-shadow .15s;
+}
+#settingsModal .llm-name:hover{border-color:var(--hairline)}
+#settingsModal .llm-name:focus{
+  outline:none;border-color:rgba(7,193,96,.62);background:rgba(255,255,255,.92);
+  box-shadow:0 0 0 3px rgba(7,193,96,.15);
+}
+#settingsModal .llm-actions{display:flex;gap:6px;flex:none}
+#settingsModal .llm-btn{
+  font:inherit;font-size:12px;padding:5px 9px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--hairline-strong);background:rgba(255,255,255,.72);color:#3c3c43;
+  transition:background .15s,border-color .15s,color .15s;
+}
+#settingsModal .llm-btn:hover:not(:disabled){background:#fff;border-color:rgba(60,60,67,.28)}
+#settingsModal .llm-btn:disabled{opacity:.45;cursor:not-allowed}
+#settingsModal .llm-btn.danger{color:#b4232a}
+#settingsModal .llm-btn.danger:hover:not(:disabled){background:rgba(180,35,42,.06);border-color:rgba(180,35,42,.38)}
+#settingsModal .llm-profile .cfg-field{margin:7px 0}
+#settingsModal .llm-profile .cfg-test{margin:6px 0 8px}
+#settingsModal .llm-foot{display:flex;align-items:center;gap:10px;margin-top:2px}
+#settingsModal .llm-foot .muted{font-size:12px}
 
 /* --- 配置弹窗：底部 --- */
 #settingsModal .cfg-path{

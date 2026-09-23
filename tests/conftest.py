@@ -130,12 +130,18 @@ class FakeGeneration:
 
 
 class FakeClassifier:
-    """分类层替身：只回固定结构，用来验证流水线的编排（不碰标签库判定逻辑）。"""
+    """分类层替身：只回固定结构，用来验证流水线的编排（不碰标签库判定逻辑）。
 
-    def __init__(self, label: str = '陈述事实', emotion: str = '无情绪', fail_times: int = 0):
+    `fail_times` 制造断连（JevConnectionError，会被补跑）；`error` 制造业务错误
+    （JevAPIError 之类，不补跑、必须原地冒泡），两者都只作用于前若干次调用。
+    """
+
+    def __init__(self, label: str = '陈述事实', emotion: str = '无情绪', fail_times: int = 0,
+                 error: Exception | None = None):
         self.label = label
         self.emotion = emotion
         self.fail_times = fail_times
+        self.error = error
         self.calls: list[dict] = []
 
     def _canned(self, want_interpretation: bool, want_suggestions: bool) -> dict:
@@ -170,6 +176,8 @@ class FakeClassifier:
             from app.core.exceptions import JevConnectionError
             self.fail_times -= 1
             raise JevConnectionError('假的连接失败')
+        if self.error is not None:
+            raise self.error
         if on_generation is not None:
             # 真实实现里这两个事件来自生成层边收边解析；替身直接照契约推一次。
             if want_interpretation:

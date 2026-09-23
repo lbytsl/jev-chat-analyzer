@@ -46,8 +46,8 @@ const badge = computed(() => {
   const info = health.value
   if (!info) return { text: '服务未连接', cls: 'bad' }
   if (!info.ok) return { text: 'Jev 未配置 · ' + info.version, cls: 'bad' }
-  if (info.general_llm === '缺失') return { text: 'DeepSeek 未配置 · ' + info.version, cls: 'warn' }
-  return { text: 'Jev + DeepSeek 已连接 · ' + info.version, cls: 'ok' }
+  if (info.general_llm === '缺失') return { text: '生成层未配置 · ' + info.version, cls: 'warn' }
+  return { text: 'Jev + 生成层已连接 · ' + info.version, cls: 'ok' }
 })
 
 const drawerOpen = ref(false)

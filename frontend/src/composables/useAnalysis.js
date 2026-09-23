@@ -149,8 +149,8 @@ export function useAnalysis({
         notice.value = '本地服务已启动，但没有读到 Jev API key（' + info.api_key
           + '）。请检查项目根目录 .env 里的 TYPESAFE_API_KEY，改完重启服务。'
       } else if (info.general_llm === '缺失') {
-        notice.value = '已读到 Jev key，但没读到 DeepSeek key（' + info.general_llm
-          + '）。回复建议和潜台词将生成失败——请在项目根目录 .env 补 DEEPSEEK_API_KEY。'
+        notice.value = '已读到 Jev key，但生成层还没有可用的 API Key（' + info.general_llm
+          + '）。回复建议和潜台词将生成失败——请在「配置 → 生成层」里给当前启用的那套填上密钥。'
       } else {
         notice.value = ''
       }

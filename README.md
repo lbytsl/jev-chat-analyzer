@@ -31,7 +31,7 @@
 后端用 [uv](https://docs.astral.sh/uv/) 管理依赖，前端用 [pnpm](https://pnpm.io/)（需先装 Node.js）。
 
 ```bash
-git clone <你的仓库地址>
+git clone https://github.com/lbytsl/jev-chat-analyzer.git
 cd jev-chat-analyzer
 
 # 后端：装好 uv 后同步依赖。macOS: brew install uv；Windows: winget install astral-sh.uv 或 pip install uv
@@ -81,6 +81,27 @@ cd frontend && pnpm run dev                # http://127.0.0.1:5173
 
 > 说明：生成层是标准 OpenAI 兼容调用，换端点只改上面三个变量、无需改代码。分类层请求格式为 Jev 私有协议，若要换成别的分类模型需要改写 `app/clients/jev.py` 的拼包与解析。
 
+生成层的地址有两种写法，**都不会拼错**：填到 `/v1` 那一层（如 `https://api.stepfun.com/v1`）代码会补上
+`/chat/completions`；直接粘完整端点（`…/v1/chat/completions`）则原样请求。生成层的报错一律带上
+**当前模型名 + 实际请求地址**（例如 `step-5-preview 返回 HTTP 404：接口地址或模型名不对（实际请求 https://…）：…`），
+所以换了别家模型后看到报错，也能一眼分清是地址写错、模型名不对，还是密钥问题。
+
+### 生成层可以存多套配置
+
+生成层（潜台词 / 回复建议）能在界面上保存**多套**「接口地址 + 模型 + 密钥」并一键切换：
+顶栏「配置 → 生成层」新增 / 删除 / 改名，圆点选中哪套就用哪套。整张表存在 `.env` 的
+`LLM_PROFILES`（单行 JSON），当前启用的那套记在 `LLM_ACTIVE`：
+
+```bash
+LLM_PROFILES=[{"name": "DeepSeek 官方", "base_url": "https://api.deepseek.com", "model": "deepseek-chat", "api_key": "sk-..."}, {"name": "本地 vLLM", "base_url": "http://127.0.0.1:8000/v1", "model": "qwen2.5", "api_key": "sk-..."}]
+LLM_ACTIVE=DeepSeek 官方
+```
+
+两个键都没写过时（含升上来的老 `.env`），`DEEPSEEK_*` 就是唯一那套，行为与以前完全一致；
+写过之后由 `LLM_ACTIVE` 指向的那套说了算，`DEEPSEEK_*` 不再参与判定。手改坏 `LLM_PROFILES`
+不会让服务起不来——退回 `DEEPSEEK_*` 继续跑，界面上会给出提示。切换只影响生成层，分类层
+（Jev）仍是单独的一套配置。
+
 ### 从界面上改配置
 
 顶栏「配置」打开面板，左侧三个 Tab：
@@ -88,13 +109,15 @@ cd frontend && pnpm run dev                # http://127.0.0.1:5173
 | Tab | 内容 |
 |-----|------|
 | 分类层 | Jev 的接口地址 / 模型 / API Key |
-| 生成层 | OpenAI 兼容端点的接口地址 / 模型 / API Key |
+| 生成层 | 多套 OpenAI 兼容端点（接口地址 / 模型 / API Key），选中哪套用哪套；每套可单独「测试」 |
 | 输出设置 | `GEN_SUGGESTIONS_COUNT`：点「生成推荐回复」时给几个方向（1–6，默认 3） |
 
 面板右上角有关闭按钮，底部「测试连接」分别探测分类层与生成层，**可以先验证再保存**：
 
 - 保存是「按行合并」写回 `.env`：只替换目标键那一行，注释、顺序、其它键都不动；
-- 密钥字段留空 = 不改动，界面只显示打码值（`sk-or…5d75`），不回传也不回填明文；
+- 生成层是**整表提交**：新增 / 删除 / 改名 / 切换启用都在一次保存里；
+- 密钥字段留空 = 不改动，界面只显示打码值（`sk-or…5d75`），不回传也不回填明文
+  （生成层按配置名字对齐：某套的密钥留空，沿用那套原来的密钥）；
 - 保存后服务端清掉配置与各服务实例的缓存，**下一次请求就用新配置，不用重启**；
 - 注意优先级：真实环境变量（例如 shell 里 `export` 的 `TYPESAFE_API_KEY`）优先于 `.env`，
   那种情况下界面保存会被环境变量盖住——先 `unset` 再用界面改。
@@ -142,7 +165,9 @@ cd frontend && pnpm run dev                # http://127.0.0.1:5173
 | TypeSafe 原生网关 | `https://api.typesafe.ai` | TypeSafe 的 key | 只写主机名；代码补上原生路径 `/v1/systemone` |
 | OpenRouter alpha decisions | `https://openrouter.ai/api/alpha/decisions` | `sk-or-...`（OpenRouter 的 key） | 已是完整端点；代码原样使用，不再追加路径 |
 
-判定规则见 `app/clients/jev.py` 的 `resolve_endpoint()`：base URL 带路径就按原样用，只写主机名才补 `/v1/systemone`。模型名 `typesafe/jev-1.13` 是 OpenRouter 上的写法，TypeSafe 原生网关用 `jev-latest`。
+判定规则见 `app/clients/jev.py` 的 `resolve_endpoint()`：base URL 带路径就按原样用，只写主机名才补 `/v1/systemone`。模型名 `typesafe/jev-1.13` 是 OpenRouter 上的写法，TypeSafe 原生网关写版本化 ID `jev-1.13.0`。
+
+> 为什么不写别名 `jev-latest`：它是别名，指向 `jev-1.13.0`，官方客户端默认也用它，但**别名会随新版本发布移动**——同一批输入可能在你没有任何改动的情况下换答案，针对旧版本调好的置信度阈值会跟着失准。官方建议是「调好阈值后钉住版本化 ID」。版本化 ID 不依赖 `GET /v1/models`（该接口目前只列别名），`model` 字段直接发即可；响应里的 `model` 字段会回报实际应答的版本号。
 
 ## 架构
 
@@ -247,8 +272,8 @@ app/
 | GET | `/sessions/{id}` | 会话详情：切换会话时整屏还原，**零模型成本** | — |
 | DELETE | `/sessions/{id}` | 删除单个会话 | — |
 | POST | `/sessions/delete` | 批量删除（多选删除） | — |
-| GET | `/config` | 当前 Jev / LLM 配置（密钥打码，不回传明文） | — |
-| PATCH | `/config` | 保存配置到 `.env`（留空 = 不改动），清缓存后立即生效 | — |
+| GET | `/config` | 当前 Jev / LLM 配置（含生成层的多套配置；密钥打码，不回传明文） | — |
+| PATCH | `/config` | 保存配置到 `.env`（留空 = 不改动；生成层可一次提交整张配置表），清缓存后立即生效 | — |
 | POST | `/config/test` | 连通性自检（可带未保存的值先验证） | 各 1 次探测调用 |
 | GET | `/health` | 版本与配置状态（启动脚本用它比对版本） | — |
 | GET | `/` | 托管 Vue 前端（`frontend/dist/index.html`，未构建时返回 503 并给出构建命令） | — |

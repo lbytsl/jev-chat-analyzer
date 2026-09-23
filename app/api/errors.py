@@ -25,12 +25,35 @@ JEV_RESPONSE_MESSAGE = 'Jev 已返回结果，但格式和当前项目不兼容�
 UNEXPECTED_MESSAGE = '这次没有取得 Jev 结果，请稍后重试。'
 
 
+def auth_hint(api_key: str, base_url: str) -> str:
+    """401/403 时按「密钥前缀 + 接口地址」给一句能落地的排查方向（纯函数，便于测试）。
+
+    分类层有两个平台，密钥不能混用、模型名写法也不同，配串了的表现就是 401：
+    OpenRouter 的密钥以 `sk-or-` 开头、地址写完整端点；TypeSafe 原生网关用自带的密钥。
+    """
+    key = (api_key or '').strip()
+    base = (base_url or '').strip() or 'https://api.typesafe.ai'
+    on_openrouter = 'openrouter.ai' in base
+    if key.startswith('sk-or-') and not on_openrouter:
+        return ('当前密钥是 OpenRouter 的（sk-or- 开头），但接口地址指向 {base}，两者不配套。'
+                '走 OpenRouter 请把地址改成完整端点 https://openrouter.ai/api/alpha/decisions、'
+                '模型名写成 typesafe/jev-1.13；走 TypeSafe 原生网关则要换成 TypeSafe 自己的密钥。'
+                .format(base=base))
+    if on_openrouter and not key.startswith('sk-or-'):
+        return ('接口地址指向 OpenRouter，但当前密钥不是 OpenRouter 的（应以 sk-or- 开头）。'
+                '请填 OpenRouter 的密钥，并把模型名写成 typesafe/jev-1.13。')
+    return ('请按接口地址指向的平台核对密钥、账号与模型权限：'
+            'TypeSafe 原生网关用 TypeSafe 的密钥 + 模型 jev-1.13.0；'
+            'OpenRouter 用 sk-or- 开头的密钥 + 模型 typesafe/jev-1.13。')
+
+
 def jev_api_error_message(status: int) -> str:
     """把上游状态码翻译成「用户下一步该做什么」。"""
     if status in (401, 403):
-        return ('Jev 拒绝了请求（HTTP {}）。API Key 已读取，但当前密钥、账号或模型权限不可用，'
-                '请按 TYPESAFE_BASE_URL 指向的平台（TypeSafe 或 OpenRouter）核对密钥与模型权限后重试。'
-                .format(status))
+        from app.core.config import get_settings
+        settings = get_settings()
+        return 'Jev 拒绝了请求（HTTP {}）。API Key 已读到，但上游不认：{}'.format(
+            status, auth_hint(settings.typesafe_api_key, settings.typesafe_base_url))
     if status == 429:
         return 'Jev 请求过于频繁或额度暂时受限（HTTP 429），请稍后再试，或减少一次分析的消息数量。'
     if status == 400:

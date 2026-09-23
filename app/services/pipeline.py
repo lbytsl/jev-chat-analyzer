@@ -301,6 +301,9 @@ class PipelineService:
         - `{'type': 'message', 'item': {...}}` 这一条算完了；
         - `{'type': 'retrying', 'index': i}` 这条断连了，稍后补跑（前端保持「生成中」）；
         - `{'type': 'failed', 'index': i}` 补跑后仍失败。
+
+        业务错误（上游 401/400、返回结构不兼容等）不走事件：原地抛出，由 sse_response
+        统一转成 `error` 事件——事件计数必须守恒，见 work() 里的注释。
         """
         workers = max(1, get_settings().jev_max_workers)
         queue: Queue = Queue()
@@ -319,6 +322,11 @@ class PipelineService:
                                           on_generation=emit)
             except JevConnectionError:
                 queue.put({'type': 'failed', 'index': index})
+            except Exception as exc:  # noqa: BLE001 —— 主循环靠事件计数，绝不能有任务静默消失
+                # 业务错误（401 / 400 / 返回结构不兼容…）：必须把异常交回主循环重新抛出。
+                # 否则这个任务既不产出 message 也不产出 failed，主循环会一直等一个永远不会
+                # 到来的事件——请求永久挂住：前端一直「生成中」，也不会有 done，自然不落库。
+                queue.put({'type': 'error', 'index': index, 'exc': exc})
             else:
                 queue.put({'type': 'message', 'item': item, 'index': index})
 
@@ -331,6 +339,9 @@ class PipelineService:
                     pool.submit(work, message)
                 while remaining:
                     event = queue.get()
+                    if event['type'] == 'error':
+                        # 交给上层：sse_response 会把它转成一条 error 事件（HTTP 早已是 200）
+                        raise event['exc']
                     if event['type'] == 'failed':
                         remaining -= 1
                         trouble.append(next(m for m in batch if m['index'] == event['index']))

@@ -11,8 +11,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_classifier, get_pipeline, get_session_service, get_settings_service
-from app.core.config import FRONTEND_INDEX
+from app.api.deps import (
+    get_classifier,
+    get_pipeline,
+    get_session_service,
+    get_settings_service,
+)
+from app.api.errors import auth_hint, jev_api_error_message
+from app.core.config import FRONTEND_INDEX, VERSION
 from app.core.exceptions import (
     GeneralLLMError,
     InvalidRequest,
@@ -89,9 +95,9 @@ class TestPages:
         response = make_client().get('/health')
         assert response.status_code == 200
         body = response.json()
-        assert body['version'] == 'v008'
+        assert body['version'] == VERSION
         assert set(body) == {'ok', 'api_key', 'general_llm', 'model', 'gen_model', 'version'}
-        assert response.headers['X-Jev'] == 'v008'
+        assert response.headers['X-Jev'] == VERSION
         assert response.headers['Cache-Control'] == 'no-store'
         assert response.headers['X-Content-Type-Options'] == 'nosniff'
 
@@ -187,7 +193,7 @@ class TestErrorMapping:
         body = response.json()
         assert body['error'], '错误体必须带 error 字段（前端只读它）'
         assert body.get('code') == code
-        assert response.headers['X-Jev'] == 'v008', '错误响应也要带版本头'
+        assert response.headers['X-Jev'] == VERSION, '错误响应也要带版本头'
 
     def test_missing_key_message_is_actionable(self):
         client = make_client(FakePipeline(error=JevConfigurationError('没 key')))
@@ -214,8 +220,27 @@ class TestErrorMapping:
         assert response.json() == {'error': '请求格式不正确。'}
 
 
+class TestAuthHint:
+    """401/403 的排查提示：按「密钥前缀 + 接口地址」指出配串了（这是真踩过的坑）。"""
+
+    def test_openrouter_key_on_the_native_gateway(self):
+        hint = auth_hint('sk-or-v1-abcdefghij', 'https://api.typesafe.ai')
+        assert 'OpenRouter' in hint and '不配套' in hint
+        assert 'abcdefghij' not in hint, '提示里不许回显密钥'
+
+    def test_other_key_on_openrouter(self):
+        assert 'sk-or-' in auth_hint('ts-abc', 'https://openrouter.ai/api/alpha/decisions')
+
+    def test_matched_pair_falls_back_to_the_checklist(self):
+        hint = auth_hint('sk-or-v1-abcdefghij', 'https://openrouter.ai/api/alpha/decisions')
+        assert 'typesafe/jev-1.13' in hint
+
+    def test_status_message_is_readable(self):
+        assert 'Jev 拒绝了请求' in jev_api_error_message(401)
+
+
 class TestOpenAPI:
     def test_schema_is_exposed(self):
         schema = make_client().get('/openapi.json').json()
         assert '/analyze-chat' in schema['paths']
-        assert schema['info']['version'] == 'v008'
+        assert schema['info']['version'] == VERSION

@@ -27,6 +27,7 @@ TIMEOUT_SECONDS = 40.0
 MAX_ATTEMPTS = 3
 INITIAL_MAX_TOKENS = 1200
 MAX_TOKENS_CEILING = 4000
+CHAT_PATH = '/chat/completions'
 
 # 重试前先让调用方清掉半截内容（流式才有意义）。
 DeltaCallback = Callable[[str], None]
@@ -65,7 +66,25 @@ class GeneralLLMClient:
 
     @property
     def endpoint(self) -> str:
-        return (self._settings.deepseek_base_url or '').rstrip('/') + '/chat/completions'
+        """实际请求的地址。两种写法都认（与 JevClient 的端点规则一致）：
+
+        - 写前缀（推荐，如 https://api.stepfun.com/v1）→ 补上 /chat/completions；
+        - 直接粘完整端点（…/v1/chat/completions）→ 原样使用，不会拼成
+          /chat/completions/chat/completions 那种莫名其妙 404 的地址。
+        """
+        base = (self._settings.deepseek_base_url or '').rstrip('/')
+        if not base:
+            return CHAT_PATH
+        return base if base.endswith(CHAT_PATH) else base + CHAT_PATH
+
+    @property
+    def label(self) -> str:
+        """错误信息里的主语：用这套配置的模型名。
+
+        生成层可以是任意 OpenAI 兼容端点（不许写死成某一家），所以报错要带上具体的
+        模型名，用户才看得出是哪套配置出的问题。
+        """
+        return (self._settings.deepseek_model or '').strip() or '生成层'
 
     @property
     def _headers(self) -> dict:
@@ -84,16 +103,30 @@ class GeneralLLMClient:
 
     def _check_key(self) -> None:
         if not self._settings.deepseek_api_key:
-            raise GeneralLLMError('未配置 DeepSeek API key（请在项目根目录 .env 里补 DEEPSEEK_API_KEY）')
+            raise GeneralLLMError(
+                '当前这套生成层配置（{}）还没填 API Key，请在「配置 → 生成层」里补上。'
+                .format(self.label))
 
-    @staticmethod
-    def _status_error(status: int, detail: str) -> tuple[GeneralLLMError, bool]:
-        """把 HTTP 状态码翻成 (错误, 是否值得重试)。401/403 没救，直接不重试。"""
+    def _status_error(self, status: int, detail: str, url: str) -> tuple[GeneralLLMError, bool]:
+        """把 HTTP 状态码翻成 (错误, 是否值得重试)。401/403 没救，直接不重试。
+
+        报错一律带上「模型名 + 实际请求地址」：生成层可换任意端点，用户看到 404 之类
+        的错误时，最需要知道的就是我们到底请求了哪个地址。
+        """
+        snippet = (detail or '').strip() or '（上游没有返回内容）'
         if status in (401, 403):
-            return GeneralLLMError('DeepSeek 鉴权失败（HTTP {}）：{}'.format(status, detail)), False
+            return GeneralLLMError('{} 鉴权失败（HTTP {}，{}）：{}'.format(
+                self.label, status, url, snippet)), False
+        if status == 404:
+            # 生成层最常见的 404：接口地址写多/写少一段，或者这个模型名上游不认。
+            return GeneralLLMError(
+                '{} 返回 HTTP 404：接口地址或模型名不对（实际请求 {}）：{}'.format(
+                    self.label, url, snippet)), False
         if status == 429 or 500 <= status < 600:
-            return GeneralLLMError('DeepSeek 返回 HTTP {}：{}'.format(status, detail)), True
-        return GeneralLLMError('DeepSeek 返回 HTTP {}：{}'.format(status, detail)), False
+            return GeneralLLMError('{} 返回 HTTP {}（{}）：{}'.format(
+                self.label, status, url, snippet)), True
+        return GeneralLLMError('{} 返回 HTTP {}（{}）：{}'.format(
+            self.label, status, url, snippet)), False
 
     @staticmethod
     def _parse_delta_line(line: str) -> tuple[str | None, str | None]:
@@ -137,13 +170,15 @@ class GeneralLLMClient:
                     response = client.post(url, json=self._body(system, user, max_tokens, False),
                                            headers=self._headers)
                 except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
-                    last_error = GeneralLLMError('DeepSeek 上游暂时连接不上：{}'.format(exc))
+                    last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
+                        self.label, url, exc))
                     if attempt < MAX_ATTEMPTS - 1:
                         time.sleep(1.5 * (attempt + 1))
                     continue
 
                 if response.status_code >= 400:
-                    error, retryable = self._status_error(response.status_code, response.text[:1500])
+                    error, retryable = self._status_error(
+                        response.status_code, response.text[:1500], url)
                     if not retryable:
                         raise error
                     last_error = error
@@ -154,13 +189,15 @@ class GeneralLLMClient:
                 try:
                     payload = response.json()
                 except ValueError as exc:
-                    last_error = GeneralLLMError('DeepSeek 返回结构无法解析：{}'.format(exc))
+                    last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
+                        self.label, url, exc))
                     continue
                 try:
                     content = payload['choices'][0]['message']['content']
                     finish = payload['choices'][0].get('finish_reason')
                 except (KeyError, IndexError, TypeError) as exc:
-                    last_error = GeneralLLMError('DeepSeek 返回结构无法解析：{}'.format(exc))
+                    last_error = GeneralLLMError('{} 返回结构无法解析（{}）：{}'.format(
+                        self.label, url, exc))
                     continue
 
                 # v008：判定成功的条件改为「拿到可用的 suggestions」即可
@@ -176,7 +213,7 @@ class GeneralLLMClient:
                 elif attempt < MAX_ATTEMPTS - 1:
                     max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
 
-        raise last_error or GeneralLLMError('DeepSeek 未能生成有效结果')
+        raise last_error or GeneralLLMError('{} 未能生成有效结果'.format(self.label))
 
     def stream_json(self, system: str, user: str, accept: Callable[[dict], bool] | None = None,
                     on_delta: DeltaCallback | None = None,
@@ -203,7 +240,8 @@ class GeneralLLMClient:
                                        headers=self._headers) as response:
                         if response.status_code >= 400:
                             error, retryable = self._status_error(
-                                response.status_code, response.read().decode('utf-8', 'replace')[:1500])
+                                response.status_code,
+                                response.read().decode('utf-8', 'replace')[:1500], url)
                             if not retryable:
                                 raise error
                             last_error = error
@@ -220,7 +258,8 @@ class GeneralLLMClient:
                             if on_delta is not None:
                                 on_delta(buffer)
                 except (httpx.TimeoutException, httpx.RequestError, TimeoutError, ConnectionError) as exc:
-                    last_error = GeneralLLMError('DeepSeek 上游暂时连接不上：{}'.format(exc))
+                    last_error = GeneralLLMError('{} 上游暂时连接不上（{}）：{}'.format(
+                        self.label, url, exc))
                     if on_reset is not None:
                         on_reset()
                     if attempt < MAX_ATTEMPTS - 1:
@@ -240,4 +279,4 @@ class GeneralLLMClient:
                 elif attempt < MAX_ATTEMPTS - 1:
                     max_tokens = min(max_tokens + 600, MAX_TOKENS_CEILING)
 
-        raise last_error or GeneralLLMError('DeepSeek 未能生成有效结果')
+        raise last_error or GeneralLLMError('{} 未能生成有效结果'.format(self.label))

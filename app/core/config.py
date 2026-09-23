@@ -4,14 +4,16 @@
 """
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 对外暴露的版本号：/health 与响应头 X-Jev 都取它，启动脚本也靠它比对「端口上跑的是不是当前代码」。
-VERSION = 'v008'
+VERSION = 'v009'
 
 # ===== 路径 =====
 BASE_DIR = Path(__file__).resolve().parents[2]          # 仓库根目录
@@ -50,6 +52,87 @@ ALLOWED_ORIGIN_REGEX = r'(?:null|https?://(?:127\.0\.0\.1|localhost)(?::\d+)?)'
 MAX_BODY_BYTES = 300_000
 
 
+# ===== 生成层多套配置（LLM_PROFILES / LLM_ACTIVE） =====
+# 生成层可以保存多套「接口地址 + 模型 + 密钥」，界面上切换用哪套。存法刻意选 .env 里的
+# 单行 JSON：`.env` 仍是唯一事实来源，不额外维护第二份配置文件（理由见 core/env_file.py）。
+# 没写过这两个键时（老用户、脚本、夹具）回退到 DEEPSEEK_* 三项，行为与以前完全一致。
+LLM_PROFILES_KEY = 'LLM_PROFILES'
+LLM_ACTIVE_KEY = 'LLM_ACTIVE'
+DEFAULT_LLM_PROFILE_NAME = '默认'      # 只有 DEEPSEEK_* 时，界面上把它当成这样一套
+MAX_LLM_PROFILES = 20                  # 存太多没有意义，界面也会跟着变成一长串
+LLM_PROFILE_NAME_MAX = 24
+
+
+@dataclass(frozen=True, slots=True)
+class LLMProfile:
+    """一套生成层配置。api_key 可为空 = 还没填（生成时会给出「未配置」的提示）。"""
+
+    name: str
+    base_url: str = ''
+    model: str = ''
+    api_key: str = ''
+
+    def to_dict(self) -> dict:
+        return {'name': self.name, 'base_url': self.base_url,
+                'model': self.model, 'api_key': self.api_key}
+
+
+def llm_profile_from(item: dict, name: str = '') -> LLMProfile:
+    """把界面 / JSON 里的一项整成 LLMProfile（只做整形，不校验——校验在 services 里）。"""
+    def text(value) -> str:
+        return '' if value is None else str(value).strip()
+
+    return LLMProfile(name=text(item.get('name')) or name,
+                      base_url=text(item.get('base_url')),
+                      model=text(item.get('model')),
+                      api_key=text(item.get('api_key')))
+
+
+def load_llm_profiles(raw) -> tuple[list[LLMProfile], str]:
+    """把 LLM_PROFILES 的 JSON 文本解析成列表，返回 (列表, 出错时的一句提示)。
+
+    解析不了时返回空列表而不是抛异常：这两个键是人工可改的，手改坏了不该让整个服务
+    起不来——退回 DEEPSEEK_* 那套继续跑，界面上再用一句话提示哪里坏了。
+    """
+    text = (raw or '').strip()
+    if not text:
+        return [], ''
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return [], 'LLM_PROFILES 不是合法的 JSON，已忽略（正在用的是 DEEPSEEK_* 那套）。'
+    if not isinstance(data, list):
+        return [], 'LLM_PROFILES 应该是 JSON 数组，已忽略（正在用的是 DEEPSEEK_* 那套）。'
+    profiles, seen = [], set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        profile = llm_profile_from(item)
+        if not profile.name or profile.name in seen:
+            continue                     # 没名字 / 重名的项直接跳过，不让它把整张表带坏
+        seen.add(profile.name)
+        profiles.append(profile)
+    if not profiles:
+        return [], 'LLM_PROFILES 里没有可用的配置项，已忽略（正在用的是 DEEPSEEK_* 那套）。'
+    return profiles, ''
+
+
+def pick_llm_profile(profiles: list[LLMProfile], active: str | None) -> LLMProfile | None:
+    """按名字取「当前启用」那套；名字对不上（被改 / 被删）就退回第一套，不至于没有可用配置。"""
+    if not profiles:
+        return None
+    wanted = (active or '').strip()
+    for profile in profiles:
+        if profile.name == wanted:
+            return profile
+    return profiles[0]
+
+
+def dump_llm_profiles(profiles: list[LLMProfile]) -> str:
+    """存进 .env 的单行 JSON（ensure_ascii=False：中文名字保持可读，方便手改）。"""
+    return json.dumps([profile.to_dict() for profile in profiles], ensure_ascii=False)
+
+
 class Settings(BaseSettings):
     """从 `.env` / 环境变量读取的运行配置（环境变量优先于 .env 文件）。"""
 
@@ -66,12 +149,20 @@ class Settings(BaseSettings):
     #   写成完整端点（OpenRouter alpha decisions）→ 原样使用
     typesafe_api_key: str = ''
     typesafe_base_url: str = 'https://api.typesafe.ai'
-    typesafe_default_model: str = 'jev-latest'
+    # 钉版本化 ID，不用别名 jev-latest：别名随新版本发布移动，判定口径会在
+    # 我们没有任何改动的情况下变化（置信度阈值也就跟着失准）。
+    typesafe_default_model: str = 'jev-1.13.0'
 
     # ---------- 生成层：OpenAI 兼容端点 ----------
     deepseek_api_key: str = ''
     deepseek_base_url: str = 'https://api.deepseek.com'
     deepseek_model: str = 'deepseek-flash'
+    # 多套配置：界面上可以保存若干套（地址+模型+密钥）并切换启用哪套。这两个键是「原始
+    # 存取」（JSON 文本 / 当前启用的名字），真正被生成链路读的始终是上面三个 deepseek_*：
+    # 初始化时会被「当前启用」那套覆盖，所以 clients/general_llm.py 与生成链路不需要
+    # 知道多套配置的存在（换配置 = 换 Settings 里那三个值，仅此而已）。
+    llm_profiles: str = ''
+    llm_active: str = ''
     # 推荐回复给几条（界面上可改）。提示词里的条数与输出整形都用它，改一处即可。
     gen_suggestions_count: int = 3
 
@@ -80,6 +171,43 @@ class Settings(BaseSettings):
     jev_max_workers: int = 4
     # 生成层每条各调一次，串行时 26 条实测十几分钟；压在 6 既能把总时间压到 1 分钟内，又不打满上游限流。
     gen_max_workers: int = 6
+
+    def model_post_init(self, __context, /) -> None:
+        """把「当前启用」那套配置落到 deepseek_* 三个字段上。
+
+        生成链路（clients/general_llm.py、services/generation.py）只认这三个字段，
+        多套配置的切换就发生在这一处，链路本身不必有分支。
+        """
+        profile = pick_llm_profile(*self._profiles_and_active())
+        if profile is None:
+            return
+        # 地址 / 模型为空时保留默认值；密钥则原样覆盖（空 = 这套还没填密钥）。
+        self.deepseek_base_url = profile.base_url or self.deepseek_base_url
+        self.deepseek_model = profile.model or self.deepseek_model
+        self.deepseek_api_key = profile.api_key
+
+    def _profiles_and_active(self) -> tuple[list[LLMProfile], str]:
+        profiles, _ = load_llm_profiles(self.llm_profiles)
+        return profiles, self.llm_active
+
+    @property
+    def llm_profile_list(self) -> list[LLMProfile]:
+        """LLM_PROFILES 里真正写了的那几套（没写过就是空列表）。"""
+        return load_llm_profiles(self.llm_profiles)[0]
+
+    @property
+    def llm_profiles_error(self) -> str:
+        """LLM_PROFILES 手改坏了的话，这里是给界面看的一句话（正常时为空串）。"""
+        return load_llm_profiles(self.llm_profiles)[1]
+
+    @property
+    def effective_llm_profiles(self) -> list[LLMProfile]:
+        """界面上要展示的整张表：写过 LLM_PROFILES 就用它，否则把 DEEPSEEK_* 当成唯一那套。"""
+        profiles = self.llm_profile_list
+        if profiles:
+            return profiles
+        return [LLMProfile(name=DEFAULT_LLM_PROFILE_NAME, base_url=self.deepseek_base_url,
+                           model=self.deepseek_model, api_key=self.deepseek_api_key)]
 
     @property
     def jev_configured(self) -> bool:

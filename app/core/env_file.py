@@ -10,6 +10,11 @@ from pathlib import Path
 
 _LINE_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$')
 
+# 双引号值里的转义 → 真实字符。必须与 format_value 的转义对称，否则「写进去再读回来」
+# 会多出一层反斜杠（LLM_PROFILES 是单行 JSON，最容易踩到）。
+_ESCAPES = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"', "'": "'"}
+_UNESCAPE_RE = re.compile(r'\\(.)')
+
 
 def read_env(path: Path) -> dict[str, str]:
     """读成 {KEY: value}；值去掉首尾空格与成对引号（与 pydantic-settings 的解析保持一致）。"""
@@ -26,9 +31,13 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        return value[1:-1]
-    return value
+    """剥掉成对引号；双引号内的转义要还原（单引号是「原样」，与 dotenv 规则一致）。"""
+    if len(value) < 2 or value[0] != value[-1] or value[0] not in ('"', "'"):
+        return value
+    body = value[1:-1]
+    if value[0] == "'":
+        return body
+    return _UNESCAPE_RE.sub(lambda match: _ESCAPES.get(match.group(1), match.group(1)), body)
 
 
 def format_value(value: str) -> str:
