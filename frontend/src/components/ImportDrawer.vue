@@ -24,7 +24,7 @@ const targets = computed(() => people.people.filter((p) => readLabels.value.incl
 const showAiOptions = computed(() => people.people.length > 0 && targets.value.length > 0)
 const submitLabel = computed(() => (people.people.length > 0 && targets.value.length === 0
   ? '先选要解读的人'
-  : '仅Jev分析（意图+情绪）'))
+  : '开始分析'))
 const submitDisabled = computed(() => analysis.busy
   || (people.people.length > 0 && targets.value.length === 0))
 
@@ -38,7 +38,13 @@ const transcriptEl = ref(null)
 const relGroupsEl = ref(null)
 
 watch(() => ui.drawerOpen, async (open) => {
-  if (!open) return
+  if (!open) {
+    if (form.importSnapshot) {
+      form.cancelImport()
+      people.cancelImport()
+    }
+    return
+  }
   await nextTick()
   transcriptEl.value?.focus()
 })
@@ -55,6 +61,9 @@ async function onSubmit() {
   // 说话人推断是防抖的（打字时不重算），提交前先按最新正文 flush 一次，
   // 否则「刚粘完就点提交」会带着上一次的解读对象发出去。
   people.sync()
+  form.finishImport()
+  people.finishImport()
+  analysis.reset()
   // 先收抽屉再等结果：分析是流式的，结果区会边跑边把消息一条条长出来，
   // 抽屉压在上面会把这个过程整个挡住 —— 看起来还是「点了没反应」，流式就白做了。
   ui.drawerOpen = false

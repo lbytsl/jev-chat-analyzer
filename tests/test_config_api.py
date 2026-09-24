@@ -18,7 +18,7 @@ from app.core.config import (
     load_llm_profiles,
 )
 from app.core.env_file import read_env, update_env
-from app.core.exceptions import InvalidRequest
+from app.core.exceptions import InvalidRequest, JevAPIError
 from app.services.settings import SettingsService, mask_key
 from tests.test_api import make_client
 
@@ -70,8 +70,23 @@ class FakeJev:
 
 class BrokenJev(FakeJev):
     def decide(self, state, questions):
-        from app.core.exceptions import JevAPIError
         raise JevAPIError(401, 'unauthorized')
+
+
+class RejectingJev(FakeJev):
+    """按需返回指定的上游错误：403 的排查提示与「上游返回原文」都靠它测。"""
+
+    status = 403
+    detail = '{"error":{"message":"No endpoints found that support tool use"}}'
+
+    def decide(self, state, questions):
+        raise JevAPIError(self.status, self.detail)
+
+
+class RejectingJevEchoingKey(RejectingJev):
+    """上游把密钥回显在错误里：给界面之前必须打码。"""
+
+    detail = '{"error":{"message":"Invalid key sk-or-v1-abcdefghijklmnop"}}'
 
 
 class FakeLLM:
@@ -284,7 +299,42 @@ class TestConnections:
                                   jev_factory=BrokenJev, llm_factory=BrokenLLM)
         result = service.test_connections()
         assert result['classification']['ok'] is False and result['classification']['detail']
+        # 鉴权失败不能只回一句「Jev HTTP 401」：要与一次性端点同一套排查方向
+        assert 'typesafe/jev-1.13' in result['classification']['detail']
         assert result['generation']['ok'] is False and 'JSON' in result['generation']['detail']
+
+    def test_403_hint_follows_the_key_that_was_actually_probed(self, tmp_path):
+        """403 要给「密钥前缀 + 地址」的排查提示，而且是按界面上还没保存的值判的。"""
+        service = SettingsService(env_path=write_env(tmp_path), settings=fake_settings(),
+                                  jev_factory=RejectingJev, llm_factory=FakeLLM)
+        result = service.test_connections({
+            'scope': 'classification',
+            'classification': {'api_key': 'ts-abc'},
+        })['classification']
+        assert result['ok'] is False
+        # 地址指向 OpenRouter、这把密钥却不是 sk-or- 开头：这句只有拿探测用的值才说得出来
+        assert '不是 OpenRouter 的' in result['detail']
+        assert 'No endpoints found' in result['detail'], '上游返回原文要带出来，否则「403」等于没说'
+        assert result['endpoint'] == 'https://openrouter.ai/api/alpha/decisions'
+
+    def test_403_hint_follows_the_pending_address_too(self, tmp_path):
+        service = SettingsService(env_path=write_env(tmp_path),
+                                  settings=fake_settings(typesafe_base_url='https://api.typesafe.ai',
+                                                         typesafe_api_key='ts-abc'),
+                                  jev_factory=RejectingJev, llm_factory=FakeLLM)
+        result = service.test_connections({
+            'scope': 'classification',
+            'classification': {'base_url': 'https://openrouter.ai/api/alpha/decisions'},
+        })['classification']
+        assert '接口地址指向 OpenRouter' in result['detail']
+
+    def test_upstream_text_never_echoes_the_plain_key(self, tmp_path):
+        """上游把密钥回显在错误里也不能漏给界面：界面从来不回传明文密钥。"""
+        service = SettingsService(env_path=write_env(tmp_path), settings=fake_settings(),
+                                  jev_factory=RejectingJevEchoingKey, llm_factory=FakeLLM)
+        detail = service.test_connections({'scope': 'classification'})['classification']['detail']
+        assert 'abcdefghijklmnop' not in detail
+        assert 'sk-or…mnop' in detail
 
 
 class TestConfigApi:

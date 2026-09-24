@@ -1,6 +1,6 @@
 <script setup>
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import AppendModal from '@/components/AppendModal.vue'
 import AugmentBar from '@/components/AugmentBar.vue'
@@ -29,11 +29,20 @@ const sessions = useSessionsStore()
 const analysis = useAnalysisStore()
 const people = usePeopleStore()
 const ui = useUiStore()
-const { openSession } = useSessionSwitch()
+const { clearCurrentSession } = useSessionSwitch()
 
 const { notice, statusText, statusErr, busy, analyzed, dockVisible, replyTarget,
         previews, renderTick, names } = storeToRefs(analysis)
 const { copyState, replyText, showRightClickHint } = storeToRefs(ui)
+const sidebarToggle = ref(null)
+let mobileQuery = null
+
+watch(() => ui.sidebarOpen, async (open) => {
+  if (open) return
+  const focusWasInSidebar = !!document.activeElement?.closest('#sessionSidebar')
+  await nextTick()
+  if (focusWasInSidebar) sidebarToggle.value?.focus()
+})
 
 /**
  * 顶部提示条的内容。
@@ -83,18 +92,27 @@ function onKeydown(event) {
 
 onMounted(async () => {
   document.addEventListener('keydown', onKeydown)
+  if (typeof window.matchMedia === 'function') {
+    mobileQuery = window.matchMedia('(max-width: 640px)')
+    mobileQuery.addEventListener('change', onViewportChange)
+  }
+  clearCurrentSession()
   analysis.probe()
-  // 持久记忆的直接收益：刷新页面后自动回到最近聊过的那条会话。
+  // 历史会话只加载到侧栏，进入页面时保持新会话空态。
   await sessions.refresh()
-  if (sessions.sessions.length) openSession(sessions.sessions[0])
 })
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
+  mobileQuery?.removeEventListener('change', onViewportChange)
   // 离开页面时停掉在途的流：否则后端会继续把剩下几十条 Jev 调用跑完（白烧额度）。
   analysis.cancelStreams()
   people.dispose()
   if (copyTimer) clearTimeout(copyTimer)
 })
+
+function onViewportChange(event) {
+  ui.sidebarOpen = !event.matches
+}
 </script>
 
 <template>
@@ -102,6 +120,8 @@ onUnmounted(() => {
     <div class="brand-row">
       <img src="/favicon.svg" class="brand-logo" alt="恋爱·职场聊天神器" />
       <b>恋爱·职场聊天神器</b>
+    </div>
+    <div class="header-status">
       <span class="badge" :class="badge.cls">{{ badge.text }}</span>
     </div>
     <div class="header-right">
@@ -138,17 +158,29 @@ onUnmounted(() => {
   </header>
   <main>
     <div id="notice" class="notice" role="status" aria-live="polite" v-show="noticeText">{{ noticeText }}</div>
-    <div class="wx-wrap">
-      <div class="wx">
+    <div class="wx" :class="{ 'sidebar-collapsed': !ui.sidebarOpen, 'sidebar-expanded': ui.sidebarOpen }">
         <ChatSidebar />
+        <button v-if="ui.sidebarOpen" type="button" class="sidebar-scrim" aria-label="关闭会话管理" @click="ui.sidebarOpen = false"></button>
         <div class="wx-main">
           <div class="wx-title">
-            <strong id="wxTitle">{{ names.other }}</strong>
-            <AugmentBar />
+            <div class="wx-title-identity">
+              <button ref="sidebarToggle" type="button" class="sidebar-toggle"
+                      :aria-label="ui.sidebarOpen ? '收起会话管理' : '展开会话管理'"
+                      :aria-expanded="ui.sidebarOpen" aria-controls="sessionSidebar"
+                      @click="ui.sidebarOpen = !ui.sidebarOpen">
+                <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <path d="M9 4v16" />
+                </svg>
+              </button>
+              <strong id="wxTitle">{{ analyzed ? names.other : '新会话' }}</strong>
+            </div>
+            <AugmentBar v-if="analyzed" />
           </div>
           <!-- 右键提示：让首次用的人知道气泡可以右键单独生成。可关闭，关掉后本次会话不再出现。 -->
           <div v-if="analyzed && showRightClickHint" class="flow-hint" role="note">
-            <span class="flow-hint-text">提示：右键任意一条消息气泡，可单独生成「潜台词 / 推荐回复 / 一键生成」；键盘用户把焦点放到那条消息的按钮上，按 Shift+F10 是同一个菜单。</span>
+            <span class="flow-hint-text flow-hint-desktop">提示：右键任意一条消息气泡，可单独生成「潜台词 / 推荐回复 / 一键生成」；键盘用户把焦点放到那条消息的按钮上，按 Shift+F10 是同一个菜单。</span>
+            <span class="flow-hint-text flow-hint-mobile">提示：点消息旁的按钮，可单独生成潜台词或回复。</span>
             <button type="button" class="flow-hint-close" aria-label="关闭提示" @click="ui.dismissHint()">×</button>
           </div>
           <!-- 分析进行中的进度。抽屉已经收起，不在这里显示就完全看不到跑到哪一步了。 -->
@@ -156,7 +188,7 @@ onUnmounted(() => {
             <span class="stream-pulse"></span>{{ statusText }}
           </div>
           <ChatFlow />
-          <div class="wx-bar">
+          <div v-if="dockVisible" class="wx-bar">
             <div class="send-row">
               <button
                 v-show="copyVisible"
@@ -180,8 +212,8 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+        <button v-if="ui.drawerOpen" type="button" class="import-scrim" aria-label="关闭导入面板" @click="ui.drawerOpen = false"></button>
         <ImportDrawer />
-      </div>
     </div>
   </main>
   <AppendModal />

@@ -33,3 +33,23 @@
   .jev-guide-options{grid-template-columns:1fr}
   .jev-guide-card>p{min-height:0}
 }
+@media(max-width:480px){
+  .guide-page{width:100%;min-height:100dvh}
+  .guide-topbar{gap:10px;padding:15px 17px}
+  .guide-brand{font-size:13px}
+  .guide-back{font-size:12px;white-space:nowrap}
+  .guide-page main{padding:27px 15px calc(44px + env(safe-area-inset-bottom))}
+  .jev-guide-intro{margin-bottom:22px}
+  .jev-guide-intro h4{margin:8px 0 10px;font-size:34px;line-height:1.16}
+  .jev-guide-intro p{font-size:14px;line-height:1.7}
+  .jev-guide-options{gap:13px}
+  .jev-guide-card{padding:18px;border-radius:14px}
+  .jev-guide-card-head strong{font-size:18px}
+  .jev-guide-card>p{margin:9px 0 17px;font-size:13px}
+  .jev-guide-card ol{margin-bottom:18px;padding-left:22px;font-size:13px}
+  .jev-guide-card li{margin-bottom:11px}
+  .jev-guide-card dl{margin-bottom:18px}
+  .jev-guide-card dl div{grid-template-columns:68px minmax(0,1fr);font-size:12px}
+  .jev-guide-card code{font-size:11px}
+  .jev-guide-use{min-height:44px}
+}

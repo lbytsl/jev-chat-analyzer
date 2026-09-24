@@ -4,11 +4,13 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { useSessionSwitch } from '@/composables/useSessionSwitch'
 import { useSessionsStore } from '@/stores/sessions'
+import { useUiStore } from '@/stores/ui'
 import { formatSessionTime } from '@/utils/time'
 
 // 列表状态全在 sessions store 里；侧栏只负责展示 + 把点击转成 action。
 // 原来它从 App 接 6 个 props、往回抛 5 个事件，等于把 store 的字段抄了一遍。
 const sessionsStore = useSessionsStore()
+const ui = useUiStore()
 const { sessions, currentId, selectMode, selected } = storeToRefs(sessionsStore)
 const { openSession, startImport, removeSessions } = useSessionSwitch()
 
@@ -52,8 +54,11 @@ const filteredSessions = computed(() => {
 </script>
 
 <template>
-  <aside class="wx-side">
-    <div class="brand">微信</div>
+  <aside id="sessionSidebar" class="wx-side" aria-label="会话管理" :inert="!ui.sidebarOpen" :aria-hidden="!ui.sidebarOpen">
+    <div class="sidebar-heading">
+      <div class="brand">会话</div>
+      <button type="button" class="sidebar-close" aria-label="收起会话管理" @click="ui.sidebarOpen = false">×</button>
+    </div>
     <div class="session-tools">
       <button type="button" class="session-new" @click="startImport()">＋ 导入聊天</button>
       <button

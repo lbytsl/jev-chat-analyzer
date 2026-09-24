@@ -47,13 +47,22 @@ def auth_hint(api_key: str, base_url: str) -> str:
             'OpenRouter 用 sk-or- 开头的密钥 + 模型 typesafe/jev-1.13。')
 
 
-def jev_api_error_message(status: int) -> str:
-    """把上游状态码翻译成「用户下一步该做什么」。"""
+def jev_api_error_message(status: int, api_key: str | None = None,
+                          base_url: str | None = None) -> str:
+    """把上游状态码翻译成「用户下一步该做什么」。
+
+    api_key / base_url 只在调用方手上有「比进程当前配置更新的值」时才传：连通性自检
+    探测的是界面上还没保存的那把密钥 / 那个地址（见 services/settings.py），拿进程里的
+    旧值去提示会说反。都不传就沿用当前配置，一次性端点的行为不变。
+    """
     if status in (401, 403):
-        from app.core.config import get_settings
-        settings = get_settings()
+        if api_key is None or base_url is None:
+            from app.core.config import get_settings
+            settings = get_settings()
+            api_key = settings.typesafe_api_key if api_key is None else api_key
+            base_url = settings.typesafe_base_url if base_url is None else base_url
         return 'Jev 拒绝了请求（HTTP {}）。API Key 已读到，但上游不认：{}'.format(
-            status, auth_hint(settings.typesafe_api_key, settings.typesafe_base_url))
+            status, auth_hint(api_key, base_url))
     if status == 429:
         return 'Jev 请求过于频繁或额度暂时受限（HTTP 429），请稍后再试，或减少一次分析的消息数量。'
     if status == 400:

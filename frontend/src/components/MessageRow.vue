@@ -31,6 +31,7 @@ const actLabel = computed(() => {
 })
 // 流式写出来的潜台词（这一条的卡片还没落地时先就地显示）。
 const liveText = computed(() => (props.preview?.text || '').trim())
+const streaming = computed(() => (props.preview?.activeKinds || []).length > 0)
 // 右键「生成推荐回复」的结果贴在这条下面（底部面板只负责最后一条）。
 // 流式期间只要有建议预览就先展开——让建议一条条冒出来，而不是等 `done` 才整块出现。
 const inlineSuggestions = computed(() => {
@@ -70,6 +71,9 @@ function onKeydown(event) {
       <span class="bub-name">{{ displayName }}</span>
       <div class="bub-line">
         <div class="bub">{{ message.text }}</div>
+        <span v-if="streaming" class="message-streaming" role="status" aria-label="这句话正在生成">
+          <span class="message-spinner" aria-hidden="true"></span>
+        </span>
         <!-- 单句潜台词：按钮就贴在气泡右边，哪一条想生成点哪一条（右键还有更多动作）。 -->
         <button
           v-if="item"

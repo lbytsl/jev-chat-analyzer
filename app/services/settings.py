@@ -34,7 +34,14 @@ from app.core.config import (
     pick_llm_profile,
 )
 from app.core.env_file import read_env, update_env
-from app.core.exceptions import GeneralLLMError, InvalidRequest
+from app.core.exceptions import (
+    GeneralLLMError,
+    InvalidRequest,
+    JevAPIError,
+    JevConfigurationError,
+    JevConnectionError,
+    JevResponseError,
+)
 
 # 界面字段 → .env 键 / Settings 字段
 CLASSIFICATION_FIELDS = {
@@ -52,6 +59,8 @@ GENERATION_FIELDS = {
 }
 
 MASK_TAIL = 4
+# 报错里附上游原文的长度上限：够看出原因，又不至于把界面撑爆。
+UPSTREAM_SNIPPET = 200
 
 
 def mask_key(value: str) -> str:
@@ -337,7 +346,7 @@ class SettingsService:
         try:
             response = client.decide(state, questions)
         except Exception as exc:  # noqa: BLE001 —— 自检要把任何失败都变成一句可读的话
-            return {'ok': False, 'detail': _readable(exc), 'endpoint': client.endpoint}
+            return {'ok': False, 'detail': _jev_failure(exc, settings), 'endpoint': client.endpoint}
         answers = response.get('answers') or {}
         if 'ping' not in answers:
             return {'ok': False, 'detail': '上游有响应，但没有返回预期结果，请确认地址与模型是否配对。',
@@ -367,3 +376,39 @@ class SettingsService:
 def _readable(exc: Exception) -> str:
     text = str(exc) or exc.__class__.__name__
     return text
+
+
+def _jev_failure(exc: Exception, settings: Settings) -> str:
+    """Jev 自检失败时的一句话：说法与一次性端点完全一致，再补上上游返回的原文。
+
+    文案映射集中在 api/errors.py，这里懒导入复用（services 静态依赖 api 是反向的，
+    与本文件 reload() 的写法一致），免得「403 该去查什么」在两边各写一份。
+    """
+    from app.api.errors import describe_error, jev_api_error_message
+
+    if isinstance(exc, JevAPIError):
+        # 按「这次探测真正用的那把密钥 + 那个地址」给提示：界面上的值可能还没保存。
+        message = jev_api_error_message(exc.status, settings.typesafe_api_key,
+                                        settings.typesafe_base_url)
+        return _with_upstream(message, exc.detail, settings.typesafe_api_key)
+    if isinstance(exc, (JevConfigurationError, JevConnectionError, JevResponseError)):
+        # 本地缺 key / 连不上 / 结构不兼容：同样走一次性端点那套文案。
+        _, body = describe_error(exc)
+        return body.get('error') or _readable(exc)
+    return _readable(exc)
+
+
+def _with_upstream(message: str, detail: str | None, api_key: str = '') -> str:
+    """把上游返回的原文附在提示后面；没有正文（超时、连不上）就原样返回。
+
+    上游偶尔会在错误里回显我们发过去的密钥，这里按同一套打码规则抹掉：界面从来不
+    回传明文密钥（见模块 docstring），报错文案不能开这个口子。
+    """
+    snippet = ' '.join((detail or '').split())
+    if api_key and api_key in snippet:
+        snippet = snippet.replace(api_key, mask_key(api_key))
+    if not snippet:
+        return message
+    if len(snippet) > UPSTREAM_SNIPPET:
+        snippet = snippet[:UPSTREAM_SNIPPET] + '…'
+    return '{} 上游返回：{}'.format(message, snippet)

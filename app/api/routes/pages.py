@@ -10,7 +10,7 @@ import mimetypes
 from fastapi import APIRouter, Response
 
 from app.api.responses import Utf8JSONResponse
-from app.core.config import BUILD_HINT, FRONTEND_ASSETS, FRONTEND_INDEX
+from app.core.config import BUILD_HINT, FRONTEND_ASSETS, FRONTEND_DIST, FRONTEND_INDEX
 
 router = APIRouter(tags=['页面'])
 # 兜底路由必须最后注册（见 main.py 的 include 顺序），否则会把真实接口/页面一起吞掉。
@@ -50,6 +50,14 @@ def asset(asset_path: str) -> Response:
 @router.get('/favicon.ico', include_in_schema=False)
 def favicon() -> Response:
     return Response(status_code=204)
+
+
+@router.get('/favicon.svg', include_in_schema=False)
+def favicon_svg() -> Response:
+    icon = FRONTEND_DIST / 'favicon.svg'
+    if not icon.is_file():
+        return _missing_build()
+    return Response(content=icon.read_bytes(), media_type='image/svg+xml')
 
 
 @fallback_router.get('/{full_path:path}', include_in_schema=False)

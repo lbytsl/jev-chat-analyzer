@@ -85,6 +85,28 @@ def _message_by_index(messages: list[dict], index: int) -> dict:
     raise JevConnectionError('内部错误：失败的序号 {} 不在本次消息里'.format(index))
 
 
+def _ordered_events(events: Iterator[dict], indexes: list[int],
+                    terminal_types: set[str]) -> Iterator[dict]:
+    """并发任务照常运行，只把逐句预览和结果按聊天顺序交给界面。"""
+    remaining = iter(indexes)
+    current = next(remaining, None)
+    known = set(indexes)
+    buffered: dict[int, list[dict]] = {}
+    for event in events:
+        index = event.get('index')
+        if current is None or index not in known:
+            yield event
+            continue
+        buffered.setdefault(index, []).append(event)
+        while current is not None and current in buffered:
+            ready = buffered.pop(current)
+            yield from ready
+            if any(item['type'] in terminal_types for item in ready):
+                current = next(remaining, None)
+            else:
+                break
+
+
 def build_context(messages: list[dict], message: dict) -> str:
     """当前消息之前最近 5 条的上下文；带时间戳时额外标注当前消息时间。"""
     # index 从 1 起；当前消息在列表中的位置是 index - 1，所以五条前文的起点是 index - 6。
@@ -291,7 +313,7 @@ class PipelineService:
 
     def analyze_stream(self, data: dict,
                        cancel: threading.Event | None = None) -> Iterator[dict]:
-        """整段分析的流式实现：每条消息一算完就推出去，卡片能一条条出现。
+        """整段分析的流式实现：并发计算，逐句预览与结果按聊天顺序推出去。
 
         事件序列：`start` →（`delta` / `item` / `reset` / `message` / `retrying` / `failed`）*
         → `done`。校验失败会直接抛（生成器还没 yield 过），由路由转成 `error` 事件。
@@ -312,9 +334,11 @@ class PipelineService:
 
         messages = setup['messages']
         results, failed = [], []
-        for event in self._run_targets_streaming(messages, setup['targets'],
+        raw_events = self._run_targets_streaming(messages, setup['targets'],
                                                  setup['relationship'], setup['gen_flags'],
-                                                 cancel=cancel):
+                                                 cancel=cancel)
+        indexes = [item['index'] for item in setup['targets']]
+        for event in _ordered_events(raw_events, indexes, {'message', 'failed'}):
             if event['type'] == 'message':
                 results.append(event['item'])
             elif event['type'] == 'failed':
@@ -477,10 +501,11 @@ class PipelineService:
                         cancel: threading.Event | None = None) -> Iterator[dict]:
         """补跑生成层的流式实现，yield 的事件序列：
 
-        `start` →（`delta` / `item` / `reset`）* → `done`。
+        `start` →（`delta` / `item` / `reset` / `result`）* → `done`。
 
         - `start` 带上这次要跑哪些序号，前端可以先把这些条标成「生成中」；
         - `delta` / `item` 是预览（潜台词逐字、建议逐条），最终结果**只**认 `done`；
+        - `result` 只表示这一句已生成完，方便界面及时撤掉加载动画；
         - `done` 里是完整的 augmentations / failed_indexes，路由用它去合并会话。
 
         `cancel` 置位（客户端断开）时停止提交剩下的任务，也不发 `done`——路由就不会去
@@ -518,10 +543,12 @@ class PipelineService:
             if job:
                 jobs.append(job)
 
+        jobs.sort(key=lambda job: job[0])
         yield {'type': 'start', 'kind': kind, 'relationship': relationship,
                'indexes': [job[0] for job in jobs], 'last_index': last_index}
         augmentations, failed_indexes = {}, []
-        for event in self._run_generation_jobs(jobs, relationship, kind, cancel=cancel):
+        raw_events = self._run_generation_jobs(jobs, relationship, kind, cancel=cancel)
+        for event in _ordered_events(raw_events, [job[0] for job in jobs], {'result'}):
             if event['type'] != 'result':
                 yield event
                 continue
@@ -529,6 +556,7 @@ class PipelineService:
             augmentations[str(index)] = event['augmentation']
             if event['augmentation'].get('gen_failed'):
                 failed_indexes.append(index)
+            yield {'type': 'result', 'index': index, 'kind': kind}
         if _cancelled(cancel):
             logger.info('%s 补跑被取消，%s 条结果不合并', kind, len(augmentations))
             return

@@ -36,4 +36,18 @@ describe('ui store', () => {
 
     expect(ui.showRightClickHint).toBe(false)
   })
+
+  it('手机端默认收起会话栏，Esc 也能关闭展开的会话栏', () => {
+    const original = window.matchMedia
+    window.matchMedia = () => ({ matches: true })
+    try {
+      const ui = useUiStore()
+      expect(ui.sidebarOpen).toBe(false)
+      ui.sidebarOpen = true
+      ui.closeOverlays()
+      expect(ui.sidebarOpen).toBe(false)
+    } finally {
+      window.matchMedia = original
+    }
+  })
 })

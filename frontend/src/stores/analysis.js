@@ -47,12 +47,13 @@ export const useAnalysisStore = defineStore('analysis', () => {
   const appendStatusErr = ref(false)
   // 每次「重新渲染对话」自增：回复面板用它做 key，回到第一版建议（与旧版重建 DOM 一致）。
   const renderTick = ref(0)
-  // 只有「新结果」才自增：用于把对话滚到底，让最后一条分析卡片进视野（补跑生成层不动滚动位置）。
+  // 只在主动打开历史会话时滚到末尾；流式分析与生成始终保留用户当前的查看位置。
   const scrollTick = ref(0)
   // 单句潜台词：哪几条正在生成、哪几条失败了（错误直接显示在那张卡片里）。
   const pendingIndexes = ref(new Set())
   const interpretErrors = ref({})
-  // 流式预览：index → { text, suggestions, kind }。只在生成过程中有值，`done` 后清空
+  // 流式预览：index → { text, suggestions, kind, activeKinds }。activeKinds 标记正在输出的类别，
+  // 单句完成就撤掉；预览文字留到 done，再由最终结果替换。
   // （最终内容以服务端返回的结果为准，预览只负责「让人看到它在动」）。
   const previews = ref({})
 
@@ -140,13 +141,13 @@ export const useAnalysisStore = defineStore('analysis', () => {
     appendStatusErr.value = isErr
   }
 
-  function render(data, isNewResult = true) {
+  function render(data, scrollToEnd = false) {
     lastData.value = data
     // withItem / applyPreview 都是原地改的：对象引用没变时 ref 的 setter 不会触发，
     // 这里显式通知一次，保证「把同一个对象再渲染一遍」也能生效。
     triggerRef(lastData)
     renderTick.value += 1
-    if (isNewResult) scrollTick.value += 1
+    if (scrollToEnd) scrollTick.value += 1
   }
 
   function setInterpretError(index, message) {
@@ -266,19 +267,23 @@ export const useAnalysisStore = defineStore('analysis', () => {
           interpretErrors.value = {}
           previews.value = {}
           lastData.value = shellOf(event)
-          render(lastData.value, true)
+          render(lastData.value)
           return
         }
         if (event.type === 'message') {
           received += 1
           setStatus(headline + '（已完成 ' + received + '/' + (event.total || total) + ' 条…）')
-          // 卡片是一条条长出来的，落地就跟着滚到底：停在原地的话新卡片全在视口外面，
-          // 看着跟「卡住了」没区别。分析期间用户也不会在这时候往上翻历史。
-          render(withItem(lastData.value, event.item), true)
+          finishPreview(event.item.index)
+          // 逐句结果在原位置补上，用户正在看的内容不要被新卡片带走。
+          render(withItem(lastData.value, event.item))
           return
         }
         if (event.type === 'done') {
           done = event
+          return
+        }
+        if (event.type === 'failed') {
+          finishPreview(event.index)
           return
         }
         applyPreview(event)
@@ -310,6 +315,7 @@ export const useAnalysisStore = defineStore('analysis', () => {
       }
       return false
     } finally {
+      for (const index of Object.keys(previews.value)) finishPreview(index)
       endStream(controller)
       busy.value = false
     }
@@ -381,19 +387,30 @@ export const useAnalysisStore = defineStore('analysis', () => {
     if (index === undefined || index === null) return
     // 按 index 原地写（每次都整表浅拷贝的话，逐字 delta 下就是「每个 token 拷一遍全表」）。
     const live = previews.value
-    const current = live[index] || { text: '', suggestions: [], kind: '' }
+    const current = live[index] || { text: '', suggestions: [], kind: '', activeKinds: [] }
+    const kind = event.kind || (event.type === 'item' ? 'suggestions' : 'interpretation')
+    const activeKinds = [...new Set([...(current.activeKinds || []), kind])]
     if (event.type === 'reset') {
       const clearing = event.kind || current.kind
       live[index] = clearing === 'suggestions'
-        ? { kind: 'suggestions', text: current.text || '', suggestions: [] }
-        : { kind: 'interpretation', text: '', suggestions: current.suggestions || [] }
+        ? { ...current, kind: 'suggestions', activeKinds, suggestions: [] }
+        : { ...current, kind: 'interpretation', activeKinds, text: '' }
     } else if (event.type === 'delta') {
-      live[index] = { ...current, kind: 'interpretation',
+      live[index] = { ...current, kind: 'interpretation', activeKinds,
         text: (current.text || '') + (event.text || '') }
     } else if (event.type === 'item') {
-      live[index] = { ...current, kind: 'suggestions',
+      live[index] = { ...current, kind: 'suggestions', activeKinds,
         suggestions: [...(current.suggestions || []), event.suggestion] }
     }
+  }
+
+  function finishPreview(index, kind = null) {
+    const current = previews.value[index]
+    if (!current) return
+    const activeKinds = kind
+      ? (current.activeKinds || []).filter((active) => active !== kind)
+      : []
+    previews.value[index] = { ...current, activeKinds, kind: activeKinds.at(-1) || '' }
   }
 
   /**
@@ -408,10 +425,10 @@ export const useAnalysisStore = defineStore('analysis', () => {
       const key = String(raw)
       const current = live[key]
       if (!current) continue
-      const other = current.kind === kind ? '' : current.kind
+      const activeKinds = (current.activeKinds || []).filter((active) => active !== kind)
       live[key] = kind === 'interpretation'
-        ? { ...current, text: '', kind: other }
-        : { ...current, suggestions: [], kind: other }
+        ? { ...current, text: '', activeKinds, kind: activeKinds.at(-1) || '' }
+        : { ...current, suggestions: [], activeKinds, kind: activeKinds.at(-1) || '' }
     }
   }
 
@@ -450,13 +467,17 @@ export const useAnalysisStore = defineStore('analysis', () => {
           done = event
           return
         }
+        if (event.type === 'result') {
+          finishPreview(event.index, kind)
+          return
+        }
         applyPreview(event)
       }, { signal: controller.signal })
       if (!done) throw new ApiError('生成没有正常结束，请重试。', 'app')
       // `done` 只带本次这一类的增量（服务端另有一份加锁合并后落库的权威副本），
       // 前端按同一套「字段是否存在」规则合并：另一类已经生成的内容不会被清掉。
       mergeLocally(data, done, kind)
-      render(data, false)
+      render(data)
       if (sessionId.value) onPersisted?.()
       if (!single && !silent) {
         setStatus(done.failed_indexes?.length

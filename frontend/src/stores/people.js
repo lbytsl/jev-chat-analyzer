@@ -22,6 +22,7 @@ export const usePeopleStore = defineStore('people', () => {
   const me = ref(null)
   const read = ref(new Set())
   const userTouched = ref(false)
+  let importSnapshot = null
   let lastKey = ''
 
   function sync() {
@@ -79,6 +80,26 @@ export const usePeopleStore = defineStore('people', () => {
     read.value = new Set(valid)
   }
 
+  function beginImport() {
+    importSnapshot = { me: me.value, read: [...read.value], userTouched: userTouched.value }
+  }
+
+  function cancelImport() {
+    if (!importSnapshot) return
+    const saved = importSnapshot
+    importSnapshot = null
+    userTouched.value = false
+    lastKey = ''
+    sync()
+    me.value = saved.me
+    read.value = new Set(saved.read)
+    userTouched.value = saved.userTouched
+  }
+
+  function finishImport() {
+    importSnapshot = null
+  }
+
   function setMe(label) {
     if (me.value === label) return
     userTouched.value = true
@@ -123,5 +144,6 @@ export const usePeopleStore = defineStore('people', () => {
   const targets = computed(() => people.value.filter((p) => read.value.has(p.label)))
   const solo = computed(() => people.value.length < 2)
 
-  return { people, me, read, targets, solo, setMe, toggleRead, restore, sync, dispose }
+  return { people, me, read, targets, solo, setMe, toggleRead, restore, sync, dispose,
+    beginImport, cancelImport, finishImport }
 })

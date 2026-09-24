@@ -129,6 +129,14 @@ class TestPages:
     def test_favicon_is_empty_204(self):
         assert make_client().get('/favicon.ico').status_code == 204
 
+    def test_svg_favicon_is_served_from_build(self):
+        response = make_client().get('/favicon.svg')
+        if (FRONTEND_INDEX.parent / 'favicon.svg').is_file():
+            assert response.status_code == 200
+            assert response.headers['content-type'].startswith('image/svg+xml')
+        else:
+            assert response.status_code == 503
+
     def test_unknown_page(self):
         response = make_client().get('/nope')
         assert response.status_code == 404
@@ -265,6 +273,13 @@ class TestAuthHint:
 
     def test_status_message_is_readable(self):
         assert 'Jev 拒绝了请求' in jev_api_error_message(401)
+
+    def test_explicit_pair_wins_over_process_settings(self):
+        """连通性自检探测的是界面上还没保存的值：提示要按传进来的密钥 / 地址算。"""
+        message = jev_api_error_message(403, api_key='ts-abc',
+                                        base_url='https://openrouter.ai/api/alpha/decisions')
+        assert '不是 OpenRouter 的' in message
+        assert 'ts-abc' not in message, '提示里不许回显密钥'
 
 
 class TestOpenAPI:

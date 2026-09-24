@@ -293,6 +293,22 @@ class TestClientEndpointAndErrors:
 
 # ---------- 流水线事件 ----------
 class TestPipelineStreams:
+    def test_concurrent_events_are_presented_in_message_order(self):
+        from app.services.pipeline import _ordered_events
+
+        arrived = [
+            {'type': 'delta', 'index': 2, 'text': '后'},
+            {'type': 'delta', 'index': 1, 'text': '先'},
+            {'type': 'result', 'index': 2},
+            {'type': 'delta', 'index': 1, 'text': '句'},
+            {'type': 'result', 'index': 1},
+        ]
+        shown = list(_ordered_events(iter(arrived), [1, 2], {'result'}))
+        assert [(event['type'], event['index']) for event in shown] == [
+            ('delta', 1), ('delta', 1), ('result', 1),
+            ('delta', 2), ('result', 2),
+        ]
+
     def test_interpret_stream_emits_preview_then_done(self, tmp_path):
         from app.services.pipeline import PipelineService
         from app.services.review_pool import ReviewPool
@@ -301,7 +317,8 @@ class TestPipelineStreams:
         service = PipelineService(classifier=FakeClassifier(label='陈述事实', emotion='无情绪'),
                                   generation=FakeGeneration(),
                                   pool=ReviewPool(path=tmp_path / 'pool.json'))
-        analyzed = service.analyze({'transcript': TRANSCRIPT, 'relationship': '恋爱'})
+        analyzed = service.analyze({'transcript': TRANSCRIPT, 'relationship': '恋爱',
+                                    'read_labels': ['我', '她']})
         events = list(service.interpret_stream({'prev': analyzed}))
 
         assert events[0]['type'] == 'start' and events[0]['kind'] == 'interpretation'
@@ -310,7 +327,11 @@ class TestPipelineStreams:
         assert previews and all('index' in e for e in previews), '预览事件必须带序号'
         # text 是增量片段：接起来才等于最终值（不是每片都发累计全文）
         assert len(previews) > 1, '应当分成多片推送'
-        assert ''.join(e['text'] for e in previews) == '嘴上嫌弃实际在撒娇'
+        for index in events[0]['indexes']:
+            assert ''.join(e['text'] for e in previews if e['index'] == index) == '嘴上嫌弃实际在撒娇'
+        shown_indexes = [e['index'] for e in events if 'index' in e]
+        assert shown_indexes == sorted(shown_indexes)
+        assert [e['index'] for e in events if e['type'] == 'result'] == events[0]['indexes']
         done = events[-1]
         assert done['type'] == 'done'
         assert all('intent_detail' in item for item in done['augmentations'].values())
@@ -343,7 +364,7 @@ class TestPipelineStreams:
         assert events[0]['type'] == 'start'
         assert events[0]['total'] == 3 and len(events[0]['messages']) == 3
         finished = [e['item']['index'] for e in events if e['type'] == 'message']
-        assert sorted(finished) == [1, 2, 3]
+        assert finished == [1, 2, 3]
         done = events[-1]
         assert done['type'] == 'done' and done['data']['count'] == 3
 

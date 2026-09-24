@@ -24,14 +24,22 @@ export function useSessionSwitch() {
 
   /** 切换到某个历史会话：整屏还原，不调用任何模型（零成本）。 */
   async function openSession(session) {
-    if (!session || session.id === sessions.currentId) return
+    if (!session) return
+    if (session.id === sessions.currentId) {
+      ui.drawerOpen = false
+      ui.closeSidebarOnMobile()
+      return
+    }
     try {
       const detail = await getSession(session.id)
+      form.finishImport()
+      people.finishImport()
       sessions.markCurrent(detail.session_id)
       analysis.applySession(detail)
       form.applySession(detail)
       people.restore({ me: detail.me_label, read: detail.read_labels })
       ui.drawerOpen = false
+      ui.closeSidebarOnMobile()
       analysis.notice = ''
     } catch (err) {
       analysis.notice = err.message
@@ -42,23 +50,27 @@ export function useSessionSwitch() {
 
   /** 把界面收回空态（当前会话被删掉、或回到没有会话的状态）。 */
   function clearCurrentSession() {
+    form.finishImport()
+    people.finishImport()
     analysis.reset()
     form.reset()
     people.restore({})
+    ui.drawerOpen = false
   }
 
   /**
-   * 「＋ 导入聊天」= 新起一段：先把界面和表单清空，再打开抽屉。
-   *
-   * 不清空的话会把上一条会话的东西带进来：文本框里还留着上次的记录、关系和 AI 勾选也还在，
-   * 点提交容易误以为是在「继续」或「追加」。旧会话本身不动，仍在左侧列表里（点一下就能回去）；
-   * 这里清的是屏幕上的当前状态 + 会话绑定（session_id 置空，新正文会存成新会话）。
+   * 「＋ 导入聊天」先打开一份空表单。旧聊天留在主界面，关闭抽屉可恢复原表单；
+   * 真正提交时才清掉旧会话绑定，避免打开面板就让左侧内容跳回空态。
    */
   function startImport() {
-    clearCurrentSession()
+    if (ui.drawerOpen) return
+    people.beginImport()
+    form.beginImport()
+    people.restore({})
     analysis.notice = ''
     ui.closeAppend()
     ui.drawerOpen = true
+    ui.closeSidebarOnMobile()
   }
 
   /**

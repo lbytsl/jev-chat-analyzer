@@ -19,7 +19,7 @@ const communicationStyle = computed(() => result.value.communication_style || {}
 
 // 模型正在写的那半句：优先显示，写完（done 事件）后换成服务端给的最终值。
 const liveText = computed(() => (props.preview?.text || '').trim())
-const typing = computed(() => !!liveText.value)
+const typing = computed(() => (props.preview?.activeKinds || []).includes('interpretation'))
 
 const intentText = computed(() => {
   const label = intent.value.label || ''

@@ -13,6 +13,7 @@ export const useFormStore = defineStore('form', () => {
   const relationship = ref('')
   const genInterpretation = ref(false)
   const genSuggestions = ref(false)
+  const importSnapshot = ref(null)
 
   /** 清空表单（收回空态 / 开始新一段导入）。 */
   function reset() {
@@ -20,6 +21,32 @@ export const useFormStore = defineStore('form', () => {
     relationship.value = ''
     genInterpretation.value = false
     genSuggestions.value = false
+  }
+
+  function beginImport() {
+    if (!importSnapshot.value) {
+      importSnapshot.value = {
+        transcript: transcript.value,
+        relationship: relationship.value,
+        genInterpretation: genInterpretation.value,
+        genSuggestions: genSuggestions.value,
+      }
+    }
+    reset()
+  }
+
+  function cancelImport() {
+    const saved = importSnapshot.value
+    if (!saved) return
+    transcript.value = saved.transcript
+    relationship.value = saved.relationship
+    genInterpretation.value = saved.genInterpretation
+    genSuggestions.value = saved.genSuggestions
+    importSnapshot.value = null
+  }
+
+  function finishImport() {
+    importSnapshot.value = null
   }
 
   /** 用会话里存的字段整屏还原（其余状态见 composables/useSessionSwitch.js）。 */
@@ -30,5 +57,6 @@ export const useFormStore = defineStore('form', () => {
     genSuggestions.value = !!detail.gen_suggestions
   }
 
-  return { transcript, relationship, genInterpretation, genSuggestions, reset, applySession }
+  return { transcript, relationship, genInterpretation, genSuggestions, importSnapshot,
+    reset, applySession, beginImport, cancelImport, finishImport }
 })

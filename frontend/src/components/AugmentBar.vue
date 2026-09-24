@@ -16,14 +16,14 @@ const relationshipText = computed(() => '关系/场景：' + (analysis.lastData?
 <template>
   <div class="wx-title-tools">
     <small id="wxRel">{{ relationshipText }}</small>
-    <template v-if="analysis.analyzed">
+    <div v-if="analysis.analyzed" class="wx-title-actions">
       <button type="button" id="augInterpret" class="aug-btn" :disabled="analysis.augDisabled"
               @click="analysis.runInterpretation()">生成潜台词</button>
       <button type="button" id="augSuggest" class="aug-btn" :disabled="analysis.augDisabled"
               @click="analysis.runSuggestions()">生成推荐回复</button>
       <button type="button" id="appendOpen" class="aug-btn ghost" @click="ui.openAppend()">继续记录</button>
       <button type="button" id="exportBtn" class="aug-btn ghost" @click="analysis.exportMarkdown()">导出</button>
-    </template>
+    </div>
     <p class="muted" id="augHint" v-show="analysis.dirty">
       文本已改动，请重新点「仅Jev分析（意图+情绪）」重跑，再决定是否要潜台词 / 推荐回复。
     </p>

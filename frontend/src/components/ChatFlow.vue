@@ -2,10 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import MessageRow from '@/components/MessageRow.vue'
+import NewSessionWelcome from '@/components/NewSessionWelcome.vue'
 import { useSessionSwitch } from '@/composables/useSessionSwitch'
 import { useAnalysisStore } from '@/stores/analysis'
 
-// 流里的每一样东西（结果、进度、预览、滚动信号）都是分析 store 的状态，
+// 流里的每一样东西（结果、进度、预览、历史会话定位信号）都是分析 store 的状态，
 // 原来是 App 一个不落地传下来的 7 个 props；直连之后这里只留「消息行怎么排」这件事。
 const analysis = useAnalysisStore()
 const { startImport } = useSessionSwitch()
@@ -25,7 +26,7 @@ const byIndex = computed(() => {
 // 底部回复面板锚定的那条：它的建议显示在底部，不在消息下面再重复一份。
 const replyIndex = computed(() => analysis.lastData?.reply_target?.index ?? null)
 
-// 只在「有结果落地」时滚到底；补跑生成层不会触发（不会把正在回看的用户拽走）。
+// 只有主动打开历史会话才定位到末尾；流式更新不会触发 scrollTick。
 watch(() => analysis.scrollTick, async () => {
   await nextTick()
   if (flowEl.value) flowEl.value.scrollTop = flowEl.value.scrollHeight
@@ -105,11 +106,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown))
     <!-- 只在「什么都还没收到」时铺整块占位：`start` 事件一到骨架就上屏了，
          继续盖着它会把后面逐条落地的卡片、逐字冒出来的潜台词全挡在外面（流式等于白做）。 -->
     <div v-if="analysis.busy && !analysis.lastData" class="empty">Jev 正在读取上下文并分析每条消息…</div>
-    <div v-else-if="!analysis.lastData" class="empty">
-      <strong>还没有聊天记录。</strong>
-      <small>点左侧「导入聊天」→ 选关系 / 场景 → 粘贴聊天记录，再点「仅Jev分析」。</small>
-      <button type="button" class="cta" @click="startImport()">导入聊天</button>
-    </div>
+    <NewSessionWelcome v-else-if="!analysis.lastData" @import="startImport()" />
     <template v-else>
       <MessageRow
         v-for="message in analysis.lastData.messages || []"

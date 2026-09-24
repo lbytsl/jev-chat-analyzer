@@ -12,6 +12,7 @@
      'suggestion': {'label': '…', 'text': '…'}} 新写完整的一条建议
     {'type': 'reset', 'index': 3, 'kind': '…'}  这一类的这一条在重试，清掉它上一轮预览
     {'type': 'message', 'item': {...}}          某条消息分类完了（整段分析）
+    {'type': 'result', 'index': 3, 'kind': '…'} 某条补跑生成完成（只带进度，不带最终内容）
     {'type': 'retrying' | 'failed', 'index': 3} 断连补跑中 / 最终失败
     {'type': 'done', ...}                       收尾：完整结果（含落库后的 session_id）
     {'type': 'error', 'message': '…'}           中途出错（HTTP 头早已发出，只能靠事件告知）
