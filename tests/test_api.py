@@ -113,6 +113,14 @@ class TestPages:
             assert response.status_code == 503
             assert response.json()['code'] == 'FRONTEND_NOT_BUILT'
 
+    def test_jev_guide_page(self):
+        response = make_client().get('/jev-guide')
+        if FRONTEND_INDEX.is_file():
+            assert response.status_code == 200
+            assert b'<div id="app">' in response.content
+        else:
+            assert response.status_code == 503
+
     def test_assets_do_not_escape_the_dist_directory(self):
         response = make_client().get('/assets/%2e%2e%2f.env')
         assert response.status_code == 404

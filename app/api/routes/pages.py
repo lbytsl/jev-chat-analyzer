@@ -1,7 +1,7 @@
 """静态资源托管：把 Vue 构建产物（frontend/dist）挂到本地服务上。
 
 只从 dist 目录读文件，并按扩展名给 Content-Type；页面本身是纯前端应用，
-不需要 SPA 深链回退（没有路由），未知地址仍然回 JSON 错误，保持旧契约。
+Jev 入门视图有显式路径 /jev-guide；未知地址仍然回 JSON 错误，保持旧契约。
 """
 from __future__ import annotations
 
@@ -29,6 +29,11 @@ def index() -> Response:
     if not FRONTEND_INDEX.is_file():
         return _missing_build()
     return Response(content=FRONTEND_INDEX.read_bytes(), media_type='text/html; charset=utf-8')
+
+
+@router.get('/jev-guide', include_in_schema=False)
+def jev_guide() -> Response:
+    return index()
 
 
 @router.get('/assets/{asset_path:path}', include_in_schema=False)

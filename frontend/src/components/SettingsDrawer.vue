@@ -1,23 +1,29 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import { getConfig, testConfig, updateConfig } from '@/api/client'
 import { useFocusTrap } from '@/composables/useFocusTrap'
 import { useAnalysisStore } from '@/stores/analysis'
 import { useUiStore } from '@/stores/ui'
+import { JEV_CHANNELS } from '@/utils/jevChannels'
 
 // 面板开关在 ui store，保存后要刷新顶栏徽标（依赖 /health）走 analysis store：
 // 原来这两件事是 App 的 open prop + close/saved 两个 emit。
 const ui = useUiStore()
 const analysis = useAnalysisStore()
+const route = useRoute()
+const router = useRouter()
 
 // 左侧 Tab：分类层 / 生成层 / 输出设置，各自管一摊配置。
 const TABS = [
-  { key: 'classification', label: '分类层' },
-  { key: 'generation', label: '生成层' },
+  { key: 'classification', label: '分类层/Jev' },
+  { key: 'generation', label: '生成层/LLM' },
   { key: 'output', label: '输出设置' },
 ]
 const active = ref('classification')
+let pendingPreset = typeof route.query.jevPreset === 'string' ? route.query.jevPreset : null
+const requestedPreset = () => JEV_CHANNELS.find((channel) => channel.id === pendingPreset)
 
 // 表单里只放「会改动的值」；密钥框默认留空 = 保持服务端已有的那把，避免把打码值写回去。
 const form = ref({
@@ -94,6 +100,16 @@ async function load() {
       typesafe_api_key: '',
       suggestions_count: info.output ? info.output.suggestions_count : 3,
     }
+    const preset = requestedPreset()
+    if (preset) {
+      form.value.typesafe_base_url = preset.baseUrl
+      form.value.typesafe_default_model = preset.model
+      setStatus('已填入地址和模型。请粘贴该平台的 API Key，测试 Jev 后保存。')
+      pendingPreset = null
+      const query = { ...route.query }
+      delete query.jevPreset
+      router.replace({ path: '/', query, hash: route.hash })
+    }
     const layer = info.generation || {}
     const profiles = (layer.profiles || []).map(toProfileForm)
     generation.value = {
@@ -169,6 +185,28 @@ async function onTest() {
   }
 }
 
+async function onTestJev() {
+  busy.value = true
+  setStatus('正在测试 Jev…')
+  try {
+    const result = await testConfig({
+      scope: 'classification',
+      classification: {
+        base_url: form.value.typesafe_base_url,
+        model: form.value.typesafe_default_model,
+        api_key: form.value.typesafe_api_key,
+      },
+    })
+    test.value = { ...test.value, classification: result.classification }
+    setStatus(result.classification.ok ? 'Jev 已连通，请点击「保存」。' : 'Jev 未连通，请看下方提示。',
+              !result.classification.ok)
+  } catch (err) {
+    setStatus(err.message, true)
+  } finally {
+    busy.value = false
+  }
+}
+
 // 单独测某一套（可以用还没保存的地址 / 模型先验证再保存）
 async function onTestProfile(index) {
   const profile = generation.value.profiles[index]
@@ -219,6 +257,7 @@ const cardEl = ref(null)
 useFocusTrap(cardEl, () => ui.settingsOpen)
 
 watch(() => ui.settingsOpen, (open) => { if (open) load() })
+onMounted(() => { if (requestedPreset()) ui.settingsOpen = true })
 </script>
 
 <template>
@@ -253,6 +292,10 @@ watch(() => ui.settingsOpen, (open) => { if (open) load() })
               <strong>分类层 · Jev</strong>
               <span class="cfg-endpoint">{{ config ? config.classification.endpoint : '' }}</span>
             </div>
+            <RouterLink class="jev-guide-link" to="/jev-guide" target="_blank" rel="noopener noreferrer">
+              <span>第一次使用？<strong>查看 Jev 获取密钥与配置步骤</strong></span>
+              <span aria-hidden="true">↗</span>
+            </RouterLink>
             <label class="cfg-field">
               <span>接口地址</span>
               <input v-model="form.typesafe_base_url" placeholder="https://api.typesafe.ai">
@@ -273,6 +316,10 @@ watch(() => ui.settingsOpen, (open) => { if (open) load() })
             <p v-if="test.classification" class="cfg-test" :class="{ ok: test.classification.ok }">
               {{ test.classification.detail }}
             </p>
+            <div class="jev-test-row">
+              <button type="button" class="jev-test-btn" :disabled="busy" @click="onTestJev">测试</button>
+              <span>仅检查当前分类层配置</span>
+            </div>
             <p class="muted cfg-note">
               只写主机名（如 https://api.typesafe.ai）会自动补 /v1/systemone；
               写完整端点（如 OpenRouter 的 /api/alpha/decisions）则原样使用。

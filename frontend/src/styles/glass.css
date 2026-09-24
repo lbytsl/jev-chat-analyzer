@@ -299,11 +299,16 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 
 /* --- 配置弹窗：头部 --- */
 #settingsModal .settings-modal{
-  width:min(700px,94vw);
-  padding:22px 24px 18px;
+  width:min(720px,94vw);
+  height:min(690px,calc(100dvh - 32px));
+  max-height:none;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  padding:22px 25px 18px;
 }
 #settingsModal .settings-head{margin-bottom:0}
-#settingsModal .settings-head h3{font-size:17px;font-weight:700;letter-spacing:-.01em}
+#settingsModal .settings-head h3{font-size:19px;font-weight:730;letter-spacing:-.025em}
 #settingsModal .settings-modal>p.muted:not(.cfg-path){
   margin:3px 0 0;
   font-size:12.5px;
@@ -315,20 +320,20 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 
 /* --- 配置弹窗：Tab 改成顶部分段控件（DOM 不变，只把左侧栏掰成横排） ---
    96px 的左栏在 680px 的弹窗里太局促，横排后输入框能拿回整行宽度。 */
-#settingsModal .settings-body{display:block;margin-top:14px}
+#settingsModal .settings-body{display:flex;flex:1;min-height:0;flex-direction:column;margin-top:18px}
 #settingsModal .settings-tabs{
   flex-direction:row;
   gap:2px;
   padding:2px;
   border-right:0;
   padding-right:2px;
-  background:rgba(118,118,128,.10);
-  border-radius:10px;
+  background:rgba(112,124,118,.10);
+  border-radius:11px;
 }
 #settingsModal .settings-tab{
   flex:1;
   text-align:center;
-  padding:7px 10px;
+  padding:9px 10px;
   border:1px solid transparent;
   border-radius:8px;
   font-size:13px;
@@ -346,41 +351,44 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 }
 
 /* --- 配置弹窗：分节玻璃卡 --- */
-#settingsModal .settings-pane{margin-top:12px}
+#settingsModal .settings-pane{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;margin-top:14px;padding-right:5px;scrollbar-width:thin;scrollbar-color:rgba(75,93,80,.26) transparent}
 #settingsModal .settings-pane section{
-  background:rgba(255,255,255,.54);
-  border:1px solid var(--glass-edge);
-  border-radius:14px;
-  padding:14px 16px 15px;
-  box-shadow:var(--elev-sm);
+  background:rgba(255,255,255,.70);
+  border:1px solid rgba(255,255,255,.85);
+  border-radius:15px;
+  padding:19px 20px 20px;
+  box-shadow:0 2px 9px rgba(27,62,41,.05),var(--top-sheen);
 }
-#settingsModal .cfg-head{margin-bottom:10px}
-#settingsModal .cfg-head strong{font-size:13.5px;letter-spacing:-.005em}
+#settingsModal .cfg-head{display:flex;align-items:flex-start;flex-direction:column;gap:6px;margin-bottom:15px}
+#settingsModal .cfg-head strong{font-size:15px;letter-spacing:-.015em}
 /* 端点走等宽字体 + 淡底标签，和正文拉开层级。 */
 #settingsModal .cfg-endpoint{
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:11px;
-  color:#6b7280;
-  background:rgba(118,118,128,.10);
+  max-width:100%;
+  font-size:10.5px;
+  line-height:1.5;
+  color:#748078;
+  background:rgba(97,119,104,.07);
   border-radius:6px;
   padding:2px 7px;
 }
 
 /* --- 配置弹窗：字段行 --- */
 #settingsModal .cfg-field{
-  grid-template-columns:88px 1fr;
-  gap:12px;
-  margin:9px 0;
+  grid-template-columns:96px 1fr;
+  gap:14px;
+  margin:12px 0;
 }
 #settingsModal .cfg-field>span{
   font-size:12.5px;
   font-weight:500;
   color:#3c3c43;
-  text-align:right;
+  text-align:left;
 }
 #settingsModal .cfg-field input{
   font-size:13px;
-  padding:9px 11px;
+  min-height:40px;
+  padding:10px 12px;
   border:1px solid var(--hairline-strong);
   border-radius:10px;
   background:rgba(255,255,255,.74);
@@ -393,8 +401,25 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
   background:rgba(255,255,255,.96);
   box-shadow:0 0 0 3.5px rgba(7,193,96,.15);
 }
-#settingsModal .cfg-note{margin:11px 0 0;font-size:12px;line-height:1.65;color:#6b6b73}
+#settingsModal .cfg-note{margin:15px 0 0;font-size:12px;line-height:1.7;color:#6b6b73}
 #settingsModal .cfg-test{margin:9px 0 0;font-size:12px}
+
+/* 分类层的 Jev 指引入口和单层测试按钮。 */
+#settingsModal .jev-guide-link{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;margin:0 0 17px;padding:11px 13px;
+  border:1px solid rgba(7,193,96,.25);border-radius:9px;
+  background:rgba(7,193,96,.07);color:#087a43;
+  font:inherit;font-size:12px;text-align:left;text-decoration:none;cursor:pointer;
+}
+#settingsModal .jev-guide-link strong{font-weight:700}
+#settingsModal .jev-guide-link>span:last-child{flex:none;font-size:16px;line-height:1}
+#settingsModal .jev-guide-link:hover{background:rgba(7,193,96,.12)}
+#settingsModal .jev-test-row{display:flex;align-items:center;gap:10px;margin-top:16px}
+#settingsModal .jev-test-row>span{font-size:11.5px;color:#87938a}
+#settingsModal .jev-test-btn{min-width:72px;padding:8px 14px;border:1px solid #b8d9c6;border-radius:8px;background:#edf9f1;color:#087a43;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+#settingsModal .jev-test-btn:hover:not(:disabled){background:#dcf2e4}
+#settingsModal .jev-test-btn:disabled{opacity:.55;cursor:default}
+#settingsModal .jev-guide-link:focus-visible,#settingsModal .jev-test-btn:focus-visible{outline:2px solid #087a43;outline-offset:2px}
 
 /* --- 配置弹窗：生成层的多套模型配置 ---
    每套一张卡，左侧圆点选启用；启用的那张描边 + 淡绿底，一眼能看出当前用哪套。 */
@@ -446,15 +471,17 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
 
 /* --- 配置弹窗：底部 --- */
 #settingsModal .cfg-path{
-  margin:14px 0 0;
-  padding-top:12px;
+  margin:12px 0 0;
+  padding-top:11px;
   border-top:1px solid var(--hairline);
   font-size:11.5px;
   line-height:1.6;
   color:#8a8f99;
 }
-#settingsModal .modal-actions{margin-top:12px;gap:9px}
+#settingsModal .modal-actions{margin-top:12px;gap:9px;min-height:38px}
+#settingsModal #settingsStatus{line-height:1.4}
 #settingsModal .modal-actions .aug-btn{
+  min-width:86px;
   padding:9px 18px;
   font-size:13px;
   border-radius:10px;
@@ -506,8 +533,11 @@ button:focus-visible{outline:2px solid rgba(7,193,96,.75);outline-offset:2px}
   .modal{border-radius:16px;padding:16px}
 }
 @media (max-width:560px){
+  #settingsModal .settings-modal{padding:17px 16px 15px}
+  #settingsModal .settings-pane section{padding:16px}
   #settingsModal .settings-tab{font-size:12px;padding:7px 4px}
-  /* 窄屏标签横排会挤，改成上下两行。 */
+  #settingsModal .modal-actions{flex-wrap:wrap}
+  #settingsModal #settingsStatus{flex-basis:100%}
   #settingsModal .cfg-field{grid-template-columns:1fr;gap:6px;margin:11px 0}
   #settingsModal .cfg-field>span{text-align:left}
 }

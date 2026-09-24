@@ -1,0 +1,35 @@
+.guide-page{min-height:100dvh;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",system-ui,sans-serif;color:#27332d;background:radial-gradient(60vw 35vw at 100% 0,rgba(7,193,96,.10),transparent 70%),#f3f7f4;font-synthesis:none}
+.guide-topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;max-width:1100px;margin:auto;padding:22px 24px;border-bottom:1px solid #dce7df}
+.guide-topbar a{color:#1d5f3b;text-decoration:none}
+.guide-brand{font-size:15px;font-weight:750}
+.guide-back{font-size:13px;font-weight:650}
+.guide-page main{display:block;width:100%;max-width:1100px;margin:auto;padding:46px 24px 76px}
+.jev-guide-intro{max-width:690px;margin-bottom:32px}
+.jev-guide-eyebrow{font-size:11px;font-weight:800;letter-spacing:.16em;color:#13834d}
+.jev-guide-intro h4{margin:10px 0 14px;font-size:clamp(32px,5vw,56px);line-height:1.12;letter-spacing:-.055em}
+.jev-guide-intro p{margin:0;color:#5a6c60;font-size:16px;line-height:1.8}
+.jev-guide-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.jev-guide-card{display:flex;flex-direction:column;min-width:0;padding:26px;border:1px solid #d8e5dc;border-radius:17px;background:#fff;box-shadow:0 12px 38px rgba(32,74,49,.06)}
+.jev-guide-card-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.jev-guide-card-head strong{font-size:21px;letter-spacing:-.02em}
+.jev-guide-card-head span{padding:5px 8px;border-radius:5px;background:#eaf6ed;color:#35714b;font-size:11px;font-weight:700;white-space:nowrap}
+.jev-guide-card>p{min-height:50px;margin:10px 0 20px;color:#65746a;font-size:14px;line-height:1.7}
+.jev-guide-card ol{margin:0 0 22px;padding-left:24px;font-size:14px;line-height:1.7}
+.jev-guide-card li{padding-left:5px;margin-bottom:13px}
+.jev-guide-card li::marker{color:#16834e;font-weight:800}
+.jev-guide-card li a{display:block;width:fit-content;color:#087a43;font-weight:750;text-decoration:underline;text-underline-offset:3px}
+.jev-guide-card dl{margin:auto 0 22px;border-top:1px solid #e6eee8}
+.jev-guide-card dl div{display:grid;grid-template-columns:92px minmax(0,1fr);gap:8px;padding:11px 0;border-bottom:1px solid #e6eee8;font-size:13px}
+.jev-guide-card dt{color:#6f7d73}
+.jev-guide-card dd{margin:0;overflow-wrap:anywhere}
+.jev-guide-card code{font-size:12px;color:#224c33}
+.jev-guide-use{width:100%;padding:13px 14px;border:0;border-radius:10px;background:#13834d;color:#fff;font:inherit;font-size:13px;font-weight:750;cursor:pointer}
+.jev-guide-use:hover{background:#0e6e40}
+.jev-guide-help{margin:24px 0 0;color:#647369;font-size:13px;line-height:1.7}
+.guide-page a:focus-visible,.guide-page button:focus-visible{outline:2px solid #087a43;outline-offset:3px}
+@media(max-width:720px){
+  .guide-page main{padding:32px 18px 48px}
+  .guide-topbar{padding:18px}
+  .jev-guide-options{grid-template-columns:1fr}
+  .jev-guide-card>p{min-height:0}
+}

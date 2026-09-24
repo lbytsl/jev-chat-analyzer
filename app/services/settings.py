@@ -294,10 +294,14 @@ class SettingsService:
 
     # ---------- 连通性自检 ----------
     def test_connections(self, payload: dict | None = None) -> dict:
-        settings = self._with_overrides(payload or {})
+        payload = payload or {}
+        scope = payload.get('scope') or 'all'
+        if scope not in ('all', 'classification', 'generation'):
+            raise InvalidRequest('测试范围只能是 classification、generation 或 all。')
+        settings = self._with_overrides(payload)
         return {
-            'classification': self._test_classification(settings),
-            'generation': self._test_generation(settings),
+            'classification': self._test_classification(settings) if scope in ('all', 'classification') else None,
+            'generation': self._test_generation(settings) if scope in ('all', 'generation') else None,
         }
 
     def _with_overrides(self, payload: dict) -> Settings:

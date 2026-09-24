@@ -87,6 +87,7 @@ class ConfigUpdateRequest(_LooseModel):
     classification: LayerUpdate | None = None
     generation: GenerationUpdate | None = None
     output: OutputUpdate | None = None
+    scope: str | None = Field(default=None, description='连通性自检范围：classification / generation / all')
 
 
 class TestResult(_LooseModel):
@@ -96,5 +97,5 @@ class TestResult(_LooseModel):
 
 
 class ConfigTestResponse(_LooseModel):
-    classification: TestResult
-    generation: TestResult
+    classification: TestResult | None = None
+    generation: TestResult | None = None

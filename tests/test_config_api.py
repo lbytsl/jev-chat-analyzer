@@ -225,6 +225,16 @@ class TestUpdate:
 
 
 class TestConnections:
+    def test_classification_scope_does_not_call_generation(self, tmp_path):
+        def unexpected_llm(_settings):
+            raise AssertionError('只测试 Jev 时不应调用生成层')
+
+        service = SettingsService(env_path=write_env(tmp_path), settings=fake_settings(),
+                                  jev_factory=FakeJev, llm_factory=unexpected_llm)
+        result = service.test_connections({'scope': 'classification'})
+        assert result['classification']['ok'] is True
+        assert result['generation'] is None
+
     def test_both_layers_ok(self, tmp_path):
         service = SettingsService(env_path=write_env(tmp_path), settings=fake_settings(),
                                   jev_factory=FakeJev, llm_factory=FakeLLM)

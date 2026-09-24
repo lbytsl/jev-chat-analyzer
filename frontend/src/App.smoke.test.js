@@ -1,6 +1,7 @@
 import { createPinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 // 只挡掉两个真会发请求的端点，其余保持真实（store 也从这里导入）。
 vi.mock('@/api/client', async (importOriginal) => {
@@ -13,6 +14,15 @@ vi.mock('@/api/client', async (importOriginal) => {
 })
 
 import App from '@/App.vue'
+import JevGuideView from '@/view/JevGuideView.vue'
+
+function mountApp(host) {
+  const router = createRouter({ history: createMemoryHistory(),
+    routes: [{ path: '/', component: App }, { path: '/jev-guide', component: JevGuideView }] })
+  const app = createApp(App).use(createPinia()).use(router)
+  app.mount(host)
+  return app
+}
 
 /**
  * 整页冒烟：真的把 App 挂到 jsdom 上。
@@ -30,8 +40,7 @@ describe('App 冒烟', () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
 
-    const app = createApp(App).use(createPinia())
-    app.mount(host)
+    const app = mountApp(host)
     await nextTick()
 
     expect(host.querySelector('#results')).toBeTruthy()
@@ -46,8 +55,7 @@ describe('App 冒烟', () => {
   it('Esc 一次收起全部浮层（页面级快捷键）', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
-    const app = createApp(App).use(createPinia())
-    app.mount(host)
+    const app = mountApp(host)
     await nextTick()
 
     document.getElementById('settingsBtn').click()
