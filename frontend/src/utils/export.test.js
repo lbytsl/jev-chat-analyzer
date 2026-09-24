@@ -17,6 +17,9 @@ const DATA = {
     { index: 2, result: {
       primary_intent: { label: '接住话了' },
       emotion: { label: '开心' },
+      relation_direction: { label: '维持' },
+      response_need: { label: '等待接话', display: '希望我接着聊' },
+      communication_style: { label: '普通陈述' },
       intent_detail: '想接着聊下去',
       suggestions: [{ label: '接住', text: '刚闲下来，你说' }],
     } },
@@ -32,6 +35,7 @@ describe('toMarkdown', () => {
     expect(markdown).toContain('消息 2 条 · 已解读 1 条')
     expect(markdown).toContain('**她**（15:01）：在忙吗')
     expect(markdown).toContain('- 意图：接住话了 · 情绪：开心')
+    expect(markdown).toContain('- 关系信号：维持 · 期待回应：希望我接着聊 · 表达：普通陈述')
     expect(markdown).toContain('- 潜台词：想接着聊下去')
     expect(markdown).toContain('  - 【接住】刚闲下来，你说')
   })

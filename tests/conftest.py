@@ -58,13 +58,22 @@ class FakeJev:
     """按 questions 里出现的问题名决定回哪一段，模拟两级路由的两次调用。"""
 
     def __init__(self, *, intent: str, family: str, emotion: str,
+                 intent_family: str | None = None, relation_direction: str = '维持',
+                 response_need: str = '不确定', communication_style: str = '普通陈述',
                  intent_score: float = 0.8, family_score: float = 0.8,
-                 emotion_score: float = 0.8, family_probs: dict | None = None,
+                 emotion_score: float = 0.8, intent_family_probs: dict | None = None,
+                 family_probs: dict | None = None,
                  model: str = 'fake-jev'):
         self.intent = intent
+        self.intent_family = intent_family or (
+            get_label_library().intents.get(intent) or {'family': '关系'})['family']
         self.family = family
         self.emotion = emotion
+        self.relation_direction = relation_direction
+        self.response_need = response_need
+        self.communication_style = communication_style
         self.intent_score = intent_score
+        self.intent_family_probs = intent_family_probs
         self.family_score = family_score
         self.emotion_score = emotion_score
         self.family_probs = family_probs
@@ -78,14 +87,27 @@ class FakeJev:
 
     def decide(self, state, questions):
         self.calls.append(questions)
-        answers = {
-            'primary_intent': self._choice(self.intent, {self.intent: self.intent_score}),
-        }
+        answers = {}
+        if 'intent_family' in questions:
+            answers['intent_family'] = self._choice(
+                self.intent_family,
+                self.intent_family_probs or {self.intent_family: self.intent_score})
         if 'emotion_family' in questions:
             probs = self.family_probs or {self.family: self.family_score}
             answers['emotion_family'] = self._choice(self.family, probs)
+        if 'relation_direction' in questions:
+            answers['relation_direction'] = self._choice(
+                self.relation_direction, {self.relation_direction: 0.8})
+        if 'response_need' in questions:
+            answers['response_need'] = self._choice(
+                self.response_need, {self.response_need: 0.8})
+        if 'primary_intent' in questions:
+            answers['primary_intent'] = self._choice(self.intent, {self.intent: self.intent_score})
         if 'emotion' in questions:
             answers['emotion'] = self._choice(self.emotion, {self.emotion: self.emotion_score})
+        if 'communication_style' in questions:
+            answers['communication_style'] = self._choice(
+                self.communication_style, {self.communication_style: 0.8})
         return {'model': self.model, 'answers': answers, 'usage': {'input_tokens': 10, 'output_tokens': 2}}
 
 
@@ -108,6 +130,7 @@ class FakeGeneration(GenerationService):
         self.calls: list[tuple] = []
         self.interpretation_calls: list[tuple] = []
         self.suggestions_calls: list[tuple] = []
+        self.suggestion_needs: list[dict] = []
 
     def _record(self, kind: str, relationship, message, speaker):
         self.calls.append((kind, relationship, message, speaker))
@@ -126,9 +149,10 @@ class FakeGeneration(GenerationService):
         return InterpretationContent(interpretation='', intent_detail=self.detail, emotion_detail='')
 
     def generate_suggestions(self, relationship, context, message, speaker, intent_result,
-                             emotion_result, on_event=None):
+                             emotion_result, on_event=None, response_need_result=None):
         self._record('suggestions', relationship, message, speaker)
         self.suggestions_calls.append((relationship, message, speaker))
+        self.suggestion_needs.append(response_need_result or {})
         if self.fail_suggestions:
             from app.core.exceptions import GeneralLLMError
             raise GeneralLLMError('假推荐回复失败')
@@ -165,6 +189,8 @@ class FakeClassifier:
             'emotion': {'key': self.emotion, 'label': self.emotion, 'score': 0.9,
                         'ranked': [{'label': self.emotion, 'score': 0.9},
                                    {'label': '其他', 'score': 0.05}]},
+            'response_need': {'key': 'response.unclear', 'label': '不确定',
+                              'definition': '没有足够证据确定期待哪类回应', 'score': 0.8},
             # 真实分类结果一定带这几个字段（前端靠 gen_skipped 判断要不要显示潜台词），
             # 假结果也补齐，否则流水线/接口测试会踩到「真实响应里有、假响应里没有」的坑。
             'gen_skipped': skipped,

@@ -27,6 +27,7 @@ htmlcov/
 # ===== 前端（源码在 frontend/src，依赖与产物不入库） =====
 frontend/node_modules/
 frontend/dist/
+.pnpm-store/
 
 # ===== macOS 资源叉垃圾文件（每个真实文件旁自动生成的 ._xxx） =====
 ._*
@@ -46,13 +47,9 @@ jev-chat-analyzer-*.zip
 
 实现说明.md
 标签提案-恋爱补充.md
-.idea/.gitignore
-.idea/jev-chat-analyzer.iml
-.idea/misc.xml
-.idea/modules.xml
-.idea/vcs.xml
 .idea
 .codebuddy
 公众号素材
 公众号推文_恋爱职场聊天神器.md
 小红书文案_恋爱职场聊天神器.md
+/docs

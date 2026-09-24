@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from app.domain.labels import WARM_INTENTS, LabelLibrary
+from app.domain.labels import LabelLibrary
 
 # 与 config.Settings.gen_suggestions_count 的默认值一致：提示词默认按 3 条写。
 DEFAULT_SUGGESTIONS_COUNT = 3
@@ -124,11 +124,134 @@ _EMOTION_FAMILY_INSTRUCTIONS = (
     # 第二级再硬挑一个二级标签。现在优先「不瞎猜」：中性恢复成正常选项（第二级也带中性兜底）。
     '「平静中性」是正常选项、不是失败：只有看到下面这些可观察信号时才选具体大类；'
     '没有信号就直接选「平静中性」，不要为了「不落中性」而硬挑一个大类。'
-    '字面没有情绪词不等于没情绪——以下都是情绪信号：'
-    '记得对方说过的话并主动提起、主动制造或延续话题、主动发出邀约、'
-    '嘴硬否认后又留一点肯定、主动追问或索要解释、主动求助或主动补位、'
-    '主动澄清责任归属、主动表态站队。'
+    '字面没有情绪词不等于没情绪，但沟通动作本身也不能单独证明具体情绪。'
+    '主动邀约、追问、求助、澄清或表态只能结合措辞、标点与上下文判断；'
+    '如果仍没有足够证据，就选择「平静中性」。'
 )
+
+
+_INTENT_FAMILY_INSTRUCTIONS = (
+    '先判断当前消息主要在完成哪一类沟通动作，只判断大方向，不在这一步选择细标签。'
+    '关系类处理联结、靠近、安抚与边界；事务类处理信息、任务与协作；'
+    '冲突类处理质疑、追责、反击与分歧；没有更强动作时才选中性。不要自造大类。'
+)
+
+_RELATION_DIRECTION_INSTRUCTIONS = (
+    '判断这句话对当前这一次互动的直接作用，不推断长期关系结果、人格或隐藏好感度。'
+    '明确拒绝、暂停或边界必须按字面选「划界」或「拉远」，不能解释成撒娇或欲拒还迎。'
+)
+
+_RESPONSE_NEED_INSTRUCTIONS = (
+    '判断当前消息最直接期待哪类回应。只依据消息与已有上下文；'
+    '没有明确期待时选「无需回应」或「不确定」，不要为了给回复建议而硬猜。'
+)
+
+_STYLE_INSTRUCTIONS = (
+    '判断当前消息采用的主要表达方式，而不是再次判断意图或内部情绪。'
+    '只选可从措辞、标点和上下文观察到的一项；证据不足时选「无法判断」。'
+)
+
+
+def _canonicalize_notes(text: str, library: LabelLibrary, kind: str) -> str:
+    """边界说明仍由旧展示名维护，送给 Jev 前替换成规范模型名。"""
+    taxonomy = library.intent_taxonomy if kind == 'intent' else library.emotion_taxonomy
+    for legacy, item in taxonomy.items():
+        model_label = item['model_label']
+        text = text.replace('“' + legacy + '”', '“' + model_label + '”')
+        text = text.replace('「' + legacy + '」', '「' + model_label + '」')
+    return text
+
+
+def _intent_criteria(library: LabelLibrary, relationship: str, families=None) -> dict[str, str]:
+    legacy_candidates = library.intent_candidates_for(relationship, families)
+    criteria = {
+        library.intent_model_label(label): '[{}] {}'.format(
+            library.intents[label]['family'], _canonicalize_notes(definition, library, 'intent'))
+        for label, definition in legacy_candidates.items()
+    }
+    for legacy, note in _INTENT_BOUNDARY_NOTES:
+        if legacy in legacy_candidates:
+            criteria[library.intent_model_label(legacy)] += _canonicalize_notes(note, library, 'intent')
+    if '陈述事实' in legacy_candidates and relationship in ('暧昧', '恋爱'):
+        criteria[library.intent_model_label('陈述事实')] += _canonicalize_notes(
+            _INTENT_NOTE_FACT_IN_ROMANCE, library, 'intent')
+    return criteria
+
+
+def _emotion_criteria(library: LabelLibrary, relationship: str, families) -> dict[str, str]:
+    legacy_candidates = library.emotion_candidates_for(relationship, families)
+    if not legacy_candidates:
+        legacy_candidates = dict(library.emotion_candidates[relationship])
+    criteria = {library.emotion_model_label(label): _canonicalize_notes(definition, library, 'emotion')
+                for label, definition in legacy_candidates.items()}
+    for legacy, note in _EMOTION_BOUNDARY_NOTES:
+        if legacy in legacy_candidates:
+            criteria[library.emotion_model_label(legacy)] += _canonicalize_notes(note, library, 'emotion')
+    return criteria
+
+
+def build_stage1_questions(library: LabelLibrary, relationship: str,
+                           speaker: str = 'other') -> dict:
+    """第一级只做粗路由与高价值互动维度，不再直接从全部细意图中选答案。"""
+    rule = (RULE_SELF if speaker == 'me' else RULE) + STAGE_PREMISE.get(relationship, '')
+    return {
+        'intent_family': {
+            'type': 'choice',
+            'instructions': rule + _INTENT_FAMILY_INSTRUCTIONS,
+            'criteria': dict(library.intent_family_definitions),
+        },
+        'emotion_family': {
+            'type': 'choice',
+            'instructions': rule + _EMOTION_FAMILY_INSTRUCTIONS,
+            'criteria': {family: library.families[family]['definition']
+                         for family in library.family_order},
+        },
+        'relation_direction': {
+            'type': 'choice',
+            'instructions': rule + _RELATION_DIRECTION_INSTRUCTIONS,
+            'criteria': dict(library.relation_directions),
+        },
+        'response_need': {
+            'type': 'choice',
+            'instructions': rule + _RESPONSE_NEED_INSTRUCTIONS,
+            'criteria': dict(library.response_needs),
+        },
+    }
+
+
+def build_stage2_questions(library: LabelLibrary, relationship: str,
+                           intent_families, emotion_families,
+                           speaker: str = 'other', relation_direction: str = '') -> dict:
+    """第二级只在两个粗路由圈定的候选中细分，并独立判断表达方式。"""
+    rule = (RULE_SELF if speaker == 'me' else RULE) + STAGE_PREMISE.get(relationship, '')
+    warm_hint = ''
+    if relation_direction == '靠近':
+        warm_hint = (' 已知互动方向是靠近；若负面措辞更像撒娇、赌气或柔软失落，'
+                     '不要仅凭带刺字面判成真发火或彻底抽离。')
+    return {
+        'primary_intent': {
+            'type': 'choice',
+            'instructions': (rule
+                             + '已经圈定意图大类为「{}」，现在只在这些候选中选择最主要动作。'
+                               .format('、'.join(intent_families))
+                             + _canonicalize_notes(_INTENT_INSTRUCTIONS_TAIL, library, 'intent')),
+            'criteria': _intent_criteria(library, relationship, intent_families),
+        },
+        'emotion': {
+            'type': 'choice',
+            'instructions': (rule
+                             + '已经圈定情绪大类为「{}」，现在只在这些候选中选择最主要情绪。'
+                               .format('、'.join(emotion_families))
+                             + _canonicalize_notes(_EMOTION_INSTRUCTIONS_TAIL, library, 'emotion')
+                             + warm_hint),
+            'criteria': _emotion_criteria(library, relationship, emotion_families),
+        },
+        'communication_style': {
+            'type': 'choice',
+            'instructions': rule + _STYLE_INSTRUCTIONS,
+            'criteria': dict(library.communication_styles),
+        },
+    }
 
 
 def build_classification_questions(
@@ -138,68 +261,12 @@ def build_classification_questions(
     emotion_families=None,
     primary_intent=None,
 ) -> dict:
-    """二期输出是统一的双层面 choice：primary_intent（意图）+ emotion（情绪）。
-
-    情绪改两级路由后这里被调两次（emotion_families 为空 = 第一级判大类；非空 = 第二级判细分）：
-    每次只问一层，单次候选从 28+ 压到 8（第一级）或 ≤6（第二级），避免候选过多把分数摊平。
-    """
-    rule = (RULE_SELF if speaker == 'me' else RULE) + STAGE_PREMISE.get(relationship, '')
-    # 二期（v002）按 family 分层：候选定义前加 [大类] 标记，指令要求「先定大类再选标签」。
-    intent_criteria = {
-        label: '[{}] {}'.format(library.intents[label]['family'], library.intents[label]['definition'])
-        for label in library.intent_candidates[relationship]
-    }
-    for label, note in _INTENT_BOUNDARY_NOTES:
-        if label in intent_criteria:
-            intent_criteria[label] += note
-    if '陈述事实' in intent_criteria and relationship in ('暧昧', '恋爱'):
-        intent_criteria['陈述事实'] += _INTENT_NOTE_FACT_IN_ROMANCE
-
-    emotion_criteria = library.emotion_candidates_for(relationship, emotion_families)
-    if not emotion_criteria:
-        # 选中的大类在该场景没有任何标签（例如职场里没有「心动」）时退回全量，避免第二级无候选可判。
-        emotion_criteria = dict(library.emotion_candidates[relationship])
-    for label, note in _EMOTION_BOUNDARY_NOTES:
-        if label in emotion_criteria:
-            emotion_criteria[label] += note
-
-    # 意图层判成调情/撒娇时，情绪层不该再选「生气」「冷淡抽离」这类选项——两层结论要说得通。
-    warm_hint = ''
-    if primary_intent in WARM_INTENTS:
-        warm_hint = (' 已知意图层判定这条消息是在调情、撒娇或拉近距离（没有真怒气），'
-                     '所以不要选真发火、彻底放弃、彻底冷掉的那类选项；'
-                     '在这条消息语气里那份柔软的赌气、失落或撒娇之间选。')
-
-    questions = {
-        'primary_intent': {
-            'type': 'choice',
-            'instructions': rule + _INTENT_INSTRUCTIONS_TAIL,
-            'criteria': intent_criteria,
-        },
-        'emotion': {
-            'type': 'choice',
-            'instructions': (rule
-                             + '已经确定这条消息整体上属于「{}」这一类，'
-                               '现在只在这一类内部的候选里选最主要的一种。'
-                               .format('、'.join(emotion_families or []))
-                             + _EMOTION_INSTRUCTIONS_TAIL
-                             + warm_hint),
-            'criteria': emotion_criteria,
-        },
-    }
+    """旧调用名的兼容包装；新代码应显式调用 stage1 / stage2 构造器。"""
+    del primary_intent
     if emotion_families is None:
-        # 第一级只判大类，第二级（emotion）留给下一次调用，避免一次给几十个候选把分数摊平。
-        questions.pop('emotion')
-        questions['emotion_family'] = {
-            'type': 'choice',
-            'instructions': rule + _EMOTION_FAMILY_INSTRUCTIONS
-                          + ('这个阶段尤其如此：暧昧期的情绪几乎全在行为里而不在字面上。'
-                             if relationship in ('暧昧', '恋爱') else
-                             '职场里也是如此：追责任、揽功劳、撇清、求助、站队，都是情绪，'
-                             '不能一律记成「就事论事」。'),
-            'criteria': {f: library.families[f]['definition'] for f in library.family_order},
-        }
-    return questions
+        return build_stage1_questions(library, relationship, speaker)
+    return build_stage2_questions(
+        library, relationship, library.intent_family_order, emotion_families, speaker)
 
 
 _INTERPRETATION_SYSTEM = (
@@ -254,6 +321,7 @@ _SUGGESTIONS_USER = (
     '当前消息：{message}\n\n'
     'Jev 已判定的意图：{intent_label}（{intent_def}），分数 {intent_score}\n'
     'Jev 已判定的情绪：{emotion_label}（{emotion_def}），分数 {emotion_score}\n'
+    'Jev 已判定的期待回应：{response_need_label}（{response_need_def}）\n'
     '请基于以上，给出 {count} 条 suggestions（严格 JSON，不要输出其他字段）。'
 )
 
@@ -278,11 +346,14 @@ def build_interpretation_messages(relationship, context, message, speaker, inten
 
 
 def build_suggestions_messages(relationship, context, message, speaker, intent_result, emotion_result,
-                               count=DEFAULT_SUGGESTIONS_COUNT):
+                               count=DEFAULT_SUGGESTIONS_COUNT, response_need_result=None):
     """推荐回复（只做这一件事）的 system / user 两条消息。
 
     `count` 来自配置（界面可改），提示词里两处「几条」都由它决定。
     """
+    response_need = response_need_result or {}
     return (_SUGGESTIONS_SYSTEM.format(relationship=relationship, count=count),
             _fill(_SUGGESTIONS_USER, relationship, context, message, speaker,
-                  intent_result, emotion_result, count=count))
+                  intent_result, emotion_result, count=count,
+                  response_need_label=response_need.get('label', '未提供'),
+                  response_need_def=response_need.get('definition', '旧结果无此字段，按上下文判断')))

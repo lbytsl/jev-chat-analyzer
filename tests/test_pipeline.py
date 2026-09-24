@@ -9,11 +9,21 @@ import pytest
 from app.core.config import get_settings
 from app.core.exceptions import InvalidRequest, JevConnectionError
 from app.core.executors import shared_pool
-from app.services.pipeline import PipelineService
+from app.services.pipeline import PipelineService, build_context
 from app.services.review_pool import ReviewPool
 from tests.conftest import FakeClassifier, FakeGeneration
 
 TRANSCRIPT = '我：在忙吗\n她：刚开完会\n我：那晚点说'
+
+
+def test_build_context_keeps_exactly_five_prior_messages():
+    messages = [{'index': index, 'label': '她', 'text': '消息{}'.format(index),
+                 'speaker': 'other', 'timestamp': None}
+                for index in range(1, 8)]
+
+    context = build_context(messages, messages[-1])
+
+    assert context.splitlines() == ['她：消息2', '她：消息3', '她：消息4', '她：消息5', '她：消息6']
 
 
 def build(tmp_path, classifier=None, generation=None, **kwargs):

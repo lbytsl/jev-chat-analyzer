@@ -87,7 +87,8 @@ def _message_by_index(messages: list[dict], index: int) -> dict:
 
 def build_context(messages: list[dict], message: dict) -> str:
     """当前消息之前最近 5 条的上下文；带时间戳时额外标注当前消息时间。"""
-    prior = messages[max(0, message['index'] - 5):message['index'] - 1]
+    # index 从 1 起；当前消息在列表中的位置是 index - 1，所以五条前文的起点是 index - 6。
+    prior = messages[max(0, message['index'] - 6):message['index'] - 1]
     context_lines = []
     for item in prior:
         if not item['label']:
@@ -149,7 +150,10 @@ class PipelineService:
         result['confidence_flags'] = flags
         if record_pool and flags['pool_worthy']:
             self._pool.record(relationship, {'message': message['text'], 'context': context,
-                                             'speaker': message['speaker']}, flags)
+                                             'speaker': message['speaker'],
+                                             'model': result.get('model'),
+                                             'prompt_version': result.get('prompt_version'),
+                                             'label_version': result.get('label_version')}, flags)
         return {'index': message['index'], 'speaker': speaker_label(message['speaker']),
                 'label': message['label'], 'message': message['text'], 'context': context, 'result': result}
 
@@ -610,7 +614,8 @@ class PipelineService:
         if not isinstance(intent_result, dict) or not isinstance(emotion_result, dict):
             return None
         return (index, analysis.get('context', ''), analysis.get('message', ''),
-                speaker_code(analysis.get('speaker')), intent_result, emotion_result)
+                speaker_code(analysis.get('speaker')), intent_result, emotion_result,
+                result.get('response_need') or {})
 
     def _generate_interpretation(self, relationship: str, job: tuple,
                                  partial: Callable[..., None] | None = None) -> tuple[int, dict]:
@@ -618,7 +623,7 @@ class PipelineService:
 
         `partial` 是流式预览回调（`partial(index, event)`），只有走流式端点时才有。
         """
-        index, context, message, speaker, intent_result, emotion_result = job
+        index, context, message, speaker, intent_result, emotion_result, _response_need = job
         on_event = (lambda event: partial(index, event)) if partial else None
         outcome = self._generation.run_interpretation(
             relationship, context, message, speaker, intent_result, emotion_result,
@@ -634,11 +639,11 @@ class PipelineService:
     def _generate_suggestions(self, relationship: str, job: tuple,
                               partial: Callable[..., None] | None = None) -> tuple[int, dict]:
         """推荐回复单条调用，失败只标记这一条，不影响其他条。"""
-        index, context, message, speaker, intent_result, emotion_result = job
+        index, context, message, speaker, intent_result, emotion_result, response_need = job
         on_event = (lambda event: partial(index, event)) if partial else None
         outcome = self._generation.run_suggestions(
             relationship, context, message, speaker, intent_result, emotion_result,
-            on_event=on_event)
+            on_event=on_event, response_need_result=response_need)
         if not outcome.ok:
             return index, {'gen_failed': True, 'gen_error': outcome.error}
         return index, {'suggestions': outcome.content.suggestions,

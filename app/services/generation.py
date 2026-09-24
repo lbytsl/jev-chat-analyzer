@@ -229,11 +229,13 @@ class GenerationService:
 
     # ---------- 推荐回复 ----------
     def generate_suggestions(self, relationship, context, message, speaker, intent_result,
-                             emotion_result, on_event: Callable[[dict], None] | None = None
+                             emotion_result, on_event: Callable[[dict], None] | None = None,
+                             response_need_result=None,
                              ) -> SuggestionsContent:
         count = self.suggestions_count()
         system, user = build_suggestions_messages(
-            relationship, context, message, speaker, intent_result, emotion_result, count=count)
+            relationship, context, message, speaker, intent_result, emotion_result, count=count,
+            response_need_result=response_need_result)
 
         # 成功条件：至少有一条可用的建议（整形后可能全被丢掉，那时按失败处理）。
         def accept(payload: dict) -> bool:
@@ -248,13 +250,14 @@ class GenerationService:
         return self._shape_suggestions(parsed, count)
 
     def run_suggestions(self, relationship, context, message, speaker, intent_result,
-                        emotion_result, on_event: Callable[[dict], None] | None = None
+                        emotion_result, on_event: Callable[[dict], None] | None = None,
+                        response_need_result=None,
                         ) -> GenerationOutcome:
         """`generate_suggestions` 的「不抛」版本（口径同 `run_interpretation`）。"""
         try:
             return GenerationOutcome(content=self.generate_suggestions(
                 relationship, context, message, speaker, intent_result, emotion_result,
-                on_event=on_event))
+                on_event=on_event, response_need_result=response_need_result))
         except GeneralLLMError as exc:
             logger.warning('推荐回复生成失败：%s', exc)
             return GenerationOutcome(error=str(exc))

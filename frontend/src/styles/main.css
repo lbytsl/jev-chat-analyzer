@@ -68,6 +68,9 @@ button:hover{border-color:#c3c3cc}button:disabled{opacity:.55;cursor:wait}
 .intent-emotion-line .metric-label{font-weight:600;color:#303641}
 .intent-emotion-line .metric-value{font-weight:400;color:#454b56}
 .intent-emotion-line .divider{color:#98a0ab;font-weight:400}
+.analysis-dimensions{margin-top:4px;color:#667085}
+.analysis-dimensions .metric-value{color:#667085}
+.analysis-uncertainty{margin:5px 0 0;font-size:11px;line-height:1.45;color:#9a6700}
 .interpretation{margin-top:6px;color:#454b56!important;font-size:12px!important;font-weight:400;line-height:1.45}
 .interpretation strong{font-weight:600;color:#303641}
 /* 细粒度说法：标签库给锚点，这一行给具体语义（由 DeepSeek 生成，拿不到就不显示）。 */

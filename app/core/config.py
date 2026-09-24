@@ -15,6 +15,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 对外暴露的版本号：/health 与响应头 X-Jev 都取它，启动脚本也靠它比对「端口上跑的是不是当前代码」。
 VERSION = 'v1.0.0'
 
+# 分类结果自己的版本。应用版本描述整套产品，下面三个字段只描述分类协议、提示词与标签口径，
+# 这样历史会话即使跨应用版本迁移，也能准确知道当时用的是哪一套判定规则。
+ANALYSIS_SCHEMA = '2.0'
+CLASSIFICATION_PROMPT_VERSION = 'classification-v009'
+LABEL_VERSION = '2026-09-24'
+
 # ===== 路径 =====
 BASE_DIR = Path(__file__).resolve().parents[2]          # 仓库根目录
 DATA_DIR = BASE_DIR / 'data'                            # 只读数据（标签库、夹具）
@@ -244,6 +250,7 @@ EMOTION_MIN = 0.35         # 情绪层低于此值退到一级大类展示（"�
 EMOTION_POOL_MIN = 0.45    # 情绪回流线：过了 UI 门控但低于此线也留档
 TIE_GAP = 0.05             # 前两名差距小于此值视为平票
 FAMILY_TIE_GAP = 0.12      # 一级大类平票时把第二名也带进第二级
+INTENT_FAMILY_TIE_GAP = 0.12  # 意图大类平票时把第二名的细标签也带进第二级
 POOL_LIMIT = 400           # 回流池上限，满了只提示不写入
 
 # ===== 单次请求规模上限（与旧版一致） =====

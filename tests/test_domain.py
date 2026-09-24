@@ -1,10 +1,12 @@
 """领域层测试：聊天记录解析、标签库、提示词结构。全部离线，不连上游。"""
 from __future__ import annotations
 
-from app.domain.labels import RELATIONSHIPS, WARM_INTENTS
+from app.domain.labels import RELATIONSHIPS
 from app.domain.prompts import (
     build_classification_questions,
     build_interpretation_messages,
+    build_stage1_questions,
+    build_stage2_questions,
     build_suggestions_messages,
 )
 from app.domain.transcript import parse_transcript
@@ -97,6 +99,16 @@ class TestLabelLibrary:
             for relationship, definition in variants.items():
                 assert library.emotion_definition(label, relationship) == definition
 
+    def test_taxonomy_round_trips_model_labels(self, library):
+        for legacy in library.intents:
+            assert library.resolve_intent_label(library.intent_model_label(legacy)) == legacy
+            assert library.resolve_intent_label(library.intent_key(legacy)) == legacy
+            assert library.intent_key(legacy).startswith('intent.')
+        for legacy in library.emotions:
+            assert library.resolve_emotion_label(library.emotion_model_label(legacy)) == legacy
+            assert library.resolve_emotion_label(library.emotion_key(legacy)) == legacy
+            assert library.emotion_key(legacy).startswith('emotion.')
+
 
 
 PLACEHOLDERS = ('{relationship}', '{count}', '{speaker_role}', '{context}', '{message}',
@@ -112,39 +124,41 @@ def assert_no_placeholders(*texts):
 
 
 class TestPrompts:
-    def test_first_level_asks_intent_and_family(self, library):
-        questions = build_classification_questions(library, '恋爱')
-        assert set(questions) == {'primary_intent', 'emotion_family'}
-        assert questions['primary_intent']['type'] == 'choice'
+    def test_first_level_asks_coarse_routes_and_dimensions(self, library):
+        questions = build_stage1_questions(library, '恋爱')
+        assert set(questions) == {
+            'intent_family', 'emotion_family', 'relation_direction', 'response_need'}
+        assert questions['intent_family']['type'] == 'choice'
         assert set(questions['emotion_family']['criteria']) == set(library.family_order)
 
     def test_intent_criteria_carry_family_prefix(self, library):
-        questions = build_classification_questions(library, '恋爱')
+        questions = build_stage2_questions(
+            library, '恋爱', ['关系'], ['开心'])
         for label, criteria in questions['primary_intent']['criteria'].items():
-            assert criteria.startswith('[' + library.intents[label]['family'] + ']')
+            legacy = library.resolve_intent_label(label)
+            assert criteria.startswith('[' + library.intents[legacy]['family'] + ']')
 
     def test_boundary_notes_are_appended_when_label_exists(self, library):
-        questions = build_classification_questions(library, '恋爱')
+        questions = build_stage2_questions(
+            library, '恋爱', library.intent_family_order, ['开心'])
         criteria = questions['primary_intent']['criteria']
-        if '接住话了' in criteria:
-            assert '吃了，跟同事' in criteria['接住话了']
-        if '陈述事实' in criteria:
-            assert '就坐我旁边那个' in criteria['陈述事实']
-            assert '嘴硬王者' in criteria['陈述事实'], '恋爱场景应追加「先否认再留口子」的边界说明'
+        ordinary = library.intent_model_label('接住话了')
+        assert '吃了，跟同事' in criteria[ordinary]
 
     def test_second_level_only_offers_selected_families(self, library):
         families = ['开心', '心动']
-        questions = build_classification_questions(library, '恋爱', emotion_families=families,
-                                                   primary_intent='想你了')
-        assert set(questions) == {'primary_intent', 'emotion'}
-        allowed = set(library.emotion_candidates_for('恋爱', families))
+        questions = build_stage2_questions(library, '恋爱', ['关系'], families)
+        assert set(questions) == {'primary_intent', 'emotion', 'communication_style'}
+        allowed = set(library.emotion_model_criteria('恋爱', families))
         assert set(questions['emotion']['criteria']) <= allowed
         assert '开心' in questions['emotion']['instructions']
+        intent_allowed = set(library.intent_model_criteria('恋爱', ['关系']))
+        assert set(questions['primary_intent']['criteria']) == intent_allowed
 
-    def test_warm_hint_added_for_flirty_intent(self, library):
-        questions = build_classification_questions(library, '恋爱', emotion_families=['生气'],
-                                                   primary_intent=next(iter(WARM_INTENTS)))
-        assert '不要选真发火' in questions['emotion']['instructions']
+    def test_warm_hint_added_for_approaching_direction(self, library):
+        questions = build_stage2_questions(
+            library, '恋爱', ['关系'], ['生气'], relation_direction='靠近')
+        assert '不要仅凭带刺字面判成真发火' in questions['emotion']['instructions']
 
     def test_stage_premise_is_relationship_specific(self, library):
         for relationship in RELATIONSHIPS:
@@ -169,11 +183,13 @@ class TestPrompts:
         system, user = build_suggestions_messages(
             '恋爱', '我：在吗', '在的', 'other',
             {'label': '接住话了', 'definition': '兜底', 'score': 0.5},
-            {'label': '无情绪', 'definition': '中性', 'score': 0.6}, count=4)
+            {'label': '无情绪', 'definition': '中性', 'score': 0.6}, count=4,
+            response_need_result={'label': '需要解释', 'definition': '期待说明原因'})
         assert_no_placeholders(system, user)
         assert '恋爱' in system and '恋爱' in user
         assert '（无前文）' not in user
         assert '接住话了' in user
+        assert '期待回应：需要解释（期待说明原因）' in user
         # 只问建议，不提潜台词；条数来自配置
         assert '4 条 suggestions' in user
         assert '数组长度必须是 4' in system

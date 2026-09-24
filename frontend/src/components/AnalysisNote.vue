@@ -13,6 +13,9 @@ const props = defineProps({
 const result = computed(() => props.item.result || {})
 const intent = computed(() => result.value.primary_intent || {})
 const emotion = computed(() => result.value.emotion || {})
+const relationDirection = computed(() => result.value.relation_direction || {})
+const responseNeed = computed(() => result.value.response_need || {})
+const communicationStyle = computed(() => result.value.communication_style || {})
 
 // 模型正在写的那半句：优先显示，写完（done 事件）后换成服务端给的最终值。
 const liveText = computed(() => (props.preview?.text || '').trim())
@@ -33,6 +36,23 @@ const emotionText = computed(() => {
   return name + ' ' + Math.round((emotion.value.score || 0) * 100) + '%'
 })
 
+const dimensionText = computed(() => {
+  const items = []
+  const relation = relationDirection.value.display || relationDirection.value.label
+  const response = responseNeed.value.display || responseNeed.value.label
+  const style = communicationStyle.value.display || communicationStyle.value.label
+  if (relation) items.push('关系信号：' + relation)
+  if (response) items.push('期待回应：' + response)
+  if (style) items.push('表达：' + style)
+  return items
+})
+
+const uncertaintyText = computed(() => {
+  const uncertainty = result.value.uncertainty || {}
+  if (uncertainty.level !== 'high') return ''
+  return '这条信息存在较高不确定性，可展开查看候选与原始结果。'
+})
+
 // 只有勾选「生成潜台词」且这条确实生成过时才显示，未勾选 / 生成失败都不占位置。
 const detail = computed(() => {
   if (typing.value) return liveText.value
@@ -51,9 +71,18 @@ const who = computed(() => props.item.label || props.name || '对方')
 
 const raw = computed(() => JSON.stringify({
   model: result.value.model,
+  analysis_schema: result.value.analysis_schema,
+  prompt_version: result.value.prompt_version,
+  label_version: result.value.label_version,
+  intent_family: result.value.intent_family,
   primary_intent: result.value.primary_intent,
   emotion_family: result.value.emotion_family,
   emotion: result.value.emotion,
+  relation_direction: result.value.relation_direction,
+  response_need: result.value.response_need,
+  communication_style: result.value.communication_style,
+  uncertainty: result.value.uncertainty,
+  answers: result.value.answers,
   usage: result.value.usage,
 }, null, 2))
 </script>
@@ -69,6 +98,13 @@ const raw = computed(() => JSON.stringify({
         <span class="metric-label">情绪：</span><span class="metric-value">{{ emotionText }}</span>
       </span>
     </div>
+    <div v-if="dimensionText.length" class="intent-emotion-line analysis-dimensions">
+      <template v-for="(text, index) in dimensionText" :key="text">
+        <span v-if="index" class="divider">｜</span>
+        <span class="metric"><span class="metric-value">{{ text }}</span></span>
+      </template>
+    </div>
+    <p v-if="uncertaintyText" class="analysis-uncertainty">{{ uncertaintyText }}</p>
     <div v-if="detail" class="intent-detail">
       <strong>潜台词：</strong><em>{{ detail }}<span v-if="typing" class="typing-caret">▍</span></em>
     </div>

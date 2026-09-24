@@ -58,6 +58,9 @@ def confidence_flags(result: dict, library: LabelLibrary) -> dict:
     # 情绪落进「平静中性」兜底桶：这类样本模型反而很自信，只按置信度攒会全漏掉。
     generic_emotion = str(emotion['label']) in library.generic_emotions
     pool_reasons = list(reasons)
+    uncertainty = result.get('uncertainty') or {}
+    structured_reasons = [str(reason) for reason in uncertainty.get('reasons') or []]
+    pool_reasons.extend('多维判定：' + reason for reason in structured_reasons)
     if generic_top:
         pool_reasons.append('命中泛化标签「' + str(intent['label']) + '」：置信度再高也值得人看一眼，'
                             '多半是库里缺标签')
@@ -67,7 +70,9 @@ def confidence_flags(result: dict, library: LabelLibrary) -> dict:
     if emotion['ok'] and emotion['score'] < EMOTION_POOL_MIN:
         pool_reasons.append('情绪分数偏低（' + str(emotion['label']) + ' ' + str(emotion['score'])
                             + '）：过了门控但不够自信，多半是情绪候选集缺这一格')
-    if generic_emotion and generic_top:
+    if 'cross_dimension_conflict' in structured_reasons:
+        trigger = 'cross_dimension_conflict'
+    elif generic_emotion and generic_top:
         trigger = 'both'
     elif generic_top:
         trigger = 'generic_label'
@@ -79,6 +84,7 @@ def confidence_flags(result: dict, library: LabelLibrary) -> dict:
             'low_intent': not intent['ok'], 'low_emotion': not emotion['ok'],
             'low': bool(reasons), 'reasons': reasons,
             'generic_top': generic_top, 'generic_emotion': generic_emotion, 'trigger': trigger,
+            'uncertainty_reasons': structured_reasons,
             'pool_worthy': bool(pool_reasons), 'pool_reasons': pool_reasons}
 
 
@@ -125,6 +131,9 @@ class ReviewPool:
                         'key': key, 'relationship': relationship,
                         'speaker': item.get('speaker'), 'message': item.get('message'),
                         'context': item.get('context'),
+                        'model': item.get('model'),
+                        'prompt_version': item.get('prompt_version'),
+                        'label_version': item.get('label_version'),
                         'intent': flags['intent'], 'emotion': flags['emotion'],
                         'trigger': flags.get('trigger'), 'reasons': flags.get('pool_reasons', []),
                         'hits': 1,

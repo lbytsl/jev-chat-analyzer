@@ -2,7 +2,7 @@
 
 标签库是「判定的锚点」，分三层读：
 
-1. 种子文件 `data/intents_seed.json`：53 个意图 + 42 个情绪标签 + 8 个情绪大类；
+1. 种子文件 `data/intents_seed.json`：59 个意图 + 42 个情绪标签 + 8 个情绪大类；
 2. 场景过滤：每个关系只给它「该场景出现过的标签」，天然杜绝跨场景借标签；
 3. 展示层 `display_names`：同一个归一化标签在不同关系下换叫法（模型完全不感知展示层，
    所以换叫法不会重新引入锚点漂移）。
@@ -42,13 +42,21 @@ class LabelLibrary:
     families: dict[str, dict]                    # family -> {definition}
     intent_candidates: dict[str, dict[str, str]]  # relationship -> {label: definition}
     emotion_candidates: dict[str, dict[str, str]]
+    intent_family_definitions: dict[str, str]
+    intent_taxonomy: dict[str, dict]
+    emotion_taxonomy: dict[str, dict]
+    relation_directions: dict[str, str]
+    response_needs: dict[str, str]
+    communication_styles: dict[str, str]
+    schema_version: str
+    label_version: str
 
     @classmethod
     def load(cls, path: Path | str) -> LabelLibrary:
         seed = json.loads(Path(path).read_text(encoding='utf-8'))
         intents = seed['intents']
         emotions = seed['emotions']
-        return cls(
+        library = cls(
             intents=intents,
             emotions=emotions,
             families=seed['emotion_families'],
@@ -60,12 +68,41 @@ class LabelLibrary:
                 rel: {label: _emotion_definition(d, rel) for label, d in emotions.items() if rel in d['scenarios']}
                 for rel in RELATIONSHIPS
             },
+            intent_family_definitions=seed.get('intent_family_definitions') or {},
+            intent_taxonomy=seed.get('intent_taxonomy') or {},
+            emotion_taxonomy=seed.get('emotion_taxonomy') or {},
+            relation_directions=seed.get('relation_directions') or {},
+            response_needs=seed.get('response_needs') or {},
+            communication_styles=seed.get('communication_styles') or {},
+            schema_version=str(seed.get('schema_version') or '1.0'),
+            label_version=str(seed.get('label_version') or ''),
         )
+        library._validate_taxonomy()
+        return library
+
+    def _validate_taxonomy(self) -> None:
+        """启动时尽早发现标签元数据漂移，别等真实请求回来后才报「无效标签」。"""
+        missing_intents = set(self.intents) - set(self.intent_taxonomy)
+        missing_emotions = set(self.emotions) - set(self.emotion_taxonomy)
+        if missing_intents or missing_emotions:
+            raise ValueError('标签规范元数据不完整：intent={} emotion={}'.format(
+                sorted(missing_intents), sorted(missing_emotions)))
+        for name, taxonomy in (('intent', self.intent_taxonomy), ('emotion', self.emotion_taxonomy)):
+            keys = [str(item.get('key') or '') for item in taxonomy.values()]
+            labels = [str(item.get('model_label') or '') for item in taxonomy.values()]
+            if '' in keys or len(keys) != len(set(keys)):
+                raise ValueError('{} taxonomy 的 key 为空或重复'.format(name))
+            if '' in labels or len(labels) != len(set(labels)):
+                raise ValueError('{} taxonomy 的 model_label 为空或重复'.format(name))
 
     # ---------- 派生集合 ----------
     @property
     def family_order(self) -> list[str]:
         return list(self.families)
+
+    @property
+    def intent_family_order(self) -> list[str]:
+        return list(self.intent_family_definitions)
 
     @property
     def generic_intents(self) -> frozenset[str]:
@@ -89,6 +126,74 @@ class LabelLibrary:
     # ---------- 查询 ----------
     def intent_definition(self, label: str) -> str:
         return self.intents[label]['definition']
+
+    def intent_candidates_for(self, relationship: str, families=None) -> dict[str, str]:
+        """按场景与意图大类取旧标签候选；旧标签仍是兼容层里的领域主键。"""
+        candidates = self.intent_candidates[relationship]
+        if families is None:
+            return dict(candidates)
+        wanted = set(families)
+        return {label: definition for label, definition in candidates.items()
+                if self.intents[label].get('family') in wanted}
+
+    def intent_model_criteria(self, relationship: str, families=None) -> dict[str, str]:
+        """给 Jev 的规范意图名 → 定义；产品化旧名不再直接充当 choice key。"""
+        return {self.intent_model_label(label): definition
+                for label, definition in self.intent_candidates_for(relationship, families).items()}
+
+    def emotion_model_criteria(self, relationship: str, families=None) -> dict[str, str]:
+        """给 Jev 的规范情绪名 → 定义；显示名仍按场景在结果组装时决定。"""
+        return {self.emotion_model_label(label): definition
+                for label, definition in self.emotion_candidates_for(relationship, families).items()}
+
+    def intent_model_label(self, legacy_label: str) -> str:
+        return self.intent_taxonomy[legacy_label]['model_label']
+
+    def emotion_model_label(self, legacy_label: str) -> str:
+        return self.emotion_taxonomy[legacy_label]['model_label']
+
+    def intent_key(self, legacy_label: str) -> str:
+        return self.intent_taxonomy[legacy_label]['key']
+
+    def emotion_key(self, legacy_label: str) -> str:
+        return self.emotion_taxonomy[legacy_label]['key']
+
+    def resolve_intent_label(self, answer: str) -> str | None:
+        """稳定 ID / 规范名 / 旧名或别名 → 兼容层旧标签。"""
+        return self._resolve_label(answer, self.intents, self.intent_taxonomy)
+
+    def resolve_emotion_label(self, answer: str) -> str | None:
+        return self._resolve_label(answer, self.emotions, self.emotion_taxonomy)
+
+    @staticmethod
+    def _resolve_label(answer: str, entries: dict[str, dict], taxonomy: dict[str, dict]) -> str | None:
+        if answer in entries:
+            return answer
+        for legacy, item in taxonomy.items():
+            aliases = item.get('aliases') or ()
+            if answer == item['key'] or answer == item['model_label'] or answer in aliases:
+                return legacy
+        return None
+
+    def intent_display_name(self, label: str, relationship: str) -> str:
+        """意图展示名默认沿用旧产品词，也允许标签版本按场景覆盖。"""
+        item = self.intent_taxonomy[label]
+        return (item.get('display_names') or {}).get(relationship) or label
+
+    def normalize_intent_probabilities(self, probabilities: dict) -> dict[str, float]:
+        return self._normalize_probabilities(probabilities, self.resolve_intent_label)
+
+    def normalize_emotion_probabilities(self, probabilities: dict) -> dict[str, float]:
+        return self._normalize_probabilities(probabilities, self.resolve_emotion_label)
+
+    @staticmethod
+    def _normalize_probabilities(probabilities: dict, resolver) -> dict[str, float]:
+        normalized = {}
+        for raw_label, raw_score in probabilities.items():
+            label = resolver(raw_label)
+            if label is not None:
+                normalized[label] = float(raw_score)
+        return normalized
 
     def emotion_definition(self, label: str, relationship: str) -> str:
         """取标签在指定场景下的定义；没有场景分化时回落到 definition。"""

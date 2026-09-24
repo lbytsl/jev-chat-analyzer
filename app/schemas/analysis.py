@@ -77,6 +77,8 @@ class RankedLabel(_LooseModel):
 class LabelAnswer(_LooseModel):
     key: str
     label: str
+    canonical_key: str | None = None
+    canonical_label: str | None = None
     score: float | None = None
     score_kind: str | None = None
     confidence: float | None = None
@@ -120,11 +122,19 @@ class AnalysisResult(_LooseModel):
     """单条消息的分类 + 生成结果。`answers` 是 Jev 原始返回，原样透传便于排查。"""
 
     version: str
+    analysis_schema: str | None = None
+    prompt_version: str | None = None
+    label_version: str | None = None
     model: str | None = None
     elapsed_ms: int
+    intent_family: LabelAnswer | None = None
     primary_intent: LabelAnswer
     emotion: LabelAnswer
     emotion_family: LabelAnswer | None = None
+    relation_direction: LabelAnswer | None = None
+    response_need: LabelAnswer | None = None
+    communication_style: LabelAnswer | None = None
+    uncertainty: dict[str, Any] | None = None
     answers: dict[str, Any] = Field(default_factory=dict)
     interpretation: str | None = None
     intent_detail: str | None = None

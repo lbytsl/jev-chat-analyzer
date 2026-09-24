@@ -51,6 +51,17 @@ export function toMarkdown(data, names = {}, date = new Date()) {
       if (result.primary_intent?.label) tags.push('意图：' + result.primary_intent.label)
       if (result.emotion?.label) tags.push('情绪：' + result.emotion.label)
       if (tags.length) lines.push('- ' + tags.join(' · '))
+      const dimensions = []
+      if (result.relation_direction?.label) {
+        dimensions.push('关系信号：' + (result.relation_direction.display || result.relation_direction.label))
+      }
+      if (result.response_need?.label) {
+        dimensions.push('期待回应：' + (result.response_need.display || result.response_need.label))
+      }
+      if (result.communication_style?.label) {
+        dimensions.push('表达：' + (result.communication_style.display || result.communication_style.label))
+      }
+      if (dimensions.length) lines.push('- ' + dimensions.join(' · '))
       if (result.intent_detail) lines.push('- 潜台词：' + result.intent_detail)
       else if (result.interpretation_failed) lines.push('- 潜台词生成失败')
       const suggestions = Array.isArray(result.suggestions) ? result.suggestions : []

@@ -32,15 +32,23 @@ class TestClassify:
         service, jev = build()
         result = service.classify(STATE)
 
-        # 两级路由 = 两次调用：先意图+情绪大类，再在圈定的大类里细分。
+        # 两级路由 = 两次调用：先粗路由与互动维度，再在圈定的大类里细分。
         assert len(jev.calls) == 2
+        assert 'intent_family' in jev.calls[0] and 'primary_intent' not in jev.calls[0]
         assert 'emotion_family' in jev.calls[0] and 'emotion' not in jev.calls[0]
-        assert 'emotion' in jev.calls[1]
+        assert set(jev.calls[1]) == {'primary_intent', 'emotion', 'communication_style'}
 
         assert result['version'] and result['model'] == 'fake-jev'
+        assert result['analysis_schema'] == '2.0'
+        assert result['answers'].keys() == {'stage1', 'stage2'}
         assert result['primary_intent']['key'] == jev.intent
+        assert result['primary_intent']['canonical_key'].startswith('intent.')
         assert result['emotion']['key'] == jev.emotion
+        assert result['emotion']['canonical_key'].startswith('emotion.')
         assert result['emotion_family']['key'] == jev.family
+        assert result['relation_direction']['label'] == '维持'
+        assert result['response_need']['label'] == '不确定'
+        assert result['communication_style']['label'] == '普通陈述'
         assert result['usage'].keys() == {'stage1', 'stage2'}
         assert result['gen_skipped'] is True
         assert result['input'] == STATE
@@ -69,8 +77,24 @@ class TestClassify:
         service = ClassifierService(jev=jev, generation=FakeGeneration(), library=library)
         result = service.classify(STATE)
         assert result['emotion']['families_considered'] == [first, second]
-        assert set(jev.calls[1]['emotion']['criteria']) == set(library.emotion_candidates_for(
+        assert set(jev.calls[1]['emotion']['criteria']) == set(library.emotion_model_criteria(
             RELATIONSHIP, [first, second]))
+
+    def test_intent_family_tie_brings_second_family_into_second_stage(self):
+        library = library_of()
+        families = library.intent_family_order
+        first, second = families[0], families[1]
+        intent = next(label for label in library.intent_candidates[RELATIONSHIP]
+                      if library.intents[label]['family'] == first)
+        jev = FakeJev(intent=intent, intent_family=first, family='开心',
+                      emotion=first_emotion(library, RELATIONSHIP, '开心'),
+                      intent_family_probs={first: 0.4, second: 0.35})
+        service = ClassifierService(jev=jev, generation=FakeGeneration(), library=library)
+
+        service.classify(STATE)
+
+        assert set(jev.calls[1]['primary_intent']['criteria']) == set(
+            library.intent_model_criteria(RELATIONSHIP, [first, second]))
 
     def test_flirty_intent_with_hard_negative_family_switches_to_soft_candidates(self):
         """两层结论不能互相打脸：调情 + 生气 → 第二级换成有怨气/委屈难过。"""
@@ -78,7 +102,7 @@ class TestClassify:
         warm_intent = next(label for label in library.intent_candidates[RELATIONSHIP]
                            if label in WARM_INTENTS)
         hard_family = next(f for f in library.family_order if f in HARD_NEGATIVE_FAMILIES)
-        jev = FakeJev(intent=warm_intent, family=hard_family,
+        jev = FakeJev(intent=warm_intent, family=hard_family, relation_direction='靠近',
                       emotion=first_emotion(library, RELATIONSHIP, hard_family))
         service = ClassifierService(jev=jev, generation=FakeGeneration(), library=library)
 
@@ -89,7 +113,7 @@ class TestClassify:
 
         assert result['emotion']['families_considered'] == ['有怨气', '委屈难过']
         assert set(jev.calls[1]['emotion']['criteria']) == set(
-            library.emotion_candidates_for(RELATIONSHIP, ['有怨气', '委屈难过']))
+            library.emotion_model_criteria(RELATIONSHIP, ['有怨气', '委屈难过']))
 
     def test_invalid_intent_answer_raises_response_error(self):
         library = library_of()
@@ -106,6 +130,21 @@ class TestClassify:
         service = ClassifierService(jev=jev, generation=FakeGeneration(), library=library)
         with pytest.raises(JevResponseError):
             service.classify(STATE)
+
+    def test_explicit_boundary_cannot_be_reversed_into_approach(self):
+        service, _ = build(relation_direction='靠近')
+        result = service.classify({**STATE, 'message': '我现在不想说这个，先别聊了'})
+
+        assert result['relation_direction']['label'] == '划界'
+        assert 'explicit_boundary_override' in result['uncertainty']['reasons']
+        assert result['uncertainty']['level'] == 'high'
+
+    def test_non_boundary_negation_is_not_overridden(self):
+        service, _ = build(relation_direction='靠近')
+        result = service.classify({**STATE, 'message': '别忘了想我'})
+
+        assert result['relation_direction']['label'] == '靠近'
+        assert 'explicit_boundary_override' not in result['uncertainty']['reasons']
 
     def test_generation_failure_is_downgraded(self):
         """生成层失败只按种类标记，分类结果照常返回。"""
@@ -143,6 +182,7 @@ class TestClassify:
         assert result['suggestions'] == [{'label': '接住', 'text': '好呀'}]
         assert result['intent_detail'] is None
         assert generation.interpretation_calls == []
+        assert generation.suggestion_needs[0]['label'] == '不确定'
 
     def test_one_kind_failing_does_not_break_the_other(self):
         """潜台词挂了不影响推荐回复，反之亦然。"""
